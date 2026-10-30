@@ -196,7 +196,9 @@ if ! getent passwd "$APP_USER" >/dev/null; then
   useradd --system --user-group --home-dir "$APP_HOME" --create-home \
     --shell /usr/sbin/nologin --comment "$MARKER" "$APP_USER"
 fi
-install -d -m 755 -o "$APP_USER" -g "$APP_USER" "$APP_HOME" "$APP_HOME/work"
+install -d -m 755 -o "$APP_USER" -g "$APP_USER" "$APP_HOME"
+# Alles darin legt der Dienst-Benutzer selbst an, nicht root (Symlink-Schutz im Home des Dienstes).
+( cd "$APP_HOME" && runuser -u "$APP_USER" -- mkdir -p work )
 install -d -m 755 -o root -g root "$APP_DIR" "$CONF_DIR"
 
 # --- Programm ------------------------------------------------------------------
@@ -237,6 +239,11 @@ readonly MAX_ATTEMPTS=10          # Versuche je Puls
 readonly PAUSES=(30 60 120 240 480 900 900 900 900)   # Pausen zwischen den Versuchen (Sekunden)
 readonly ATTEMPT_TIMEOUT=180      # Höchstdauer eines Aufrufs (Sekunden)
 readonly LOG_MAX_BYTES=262144
+# Wochenlimit: Der Reset kommt laut Beobachtung des Nutzers immer samstags um 15:00 Uhr (Europe/Berlin).
+# Das ist eine Annahme, keine dokumentierte Zusage. Stimmt sie nicht, fällt der Dienst von selbst auf den 5-h-Takt zurück.
+readonly WEEKLY_DOW=6             # Wochentag des Resets als "date +%u": 6 = Samstag
+readonly WEEKLY_TIME=15:00
+readonly WEEKLY_MISS_KEEP=259200  # so lange (3 Tage) gilt die Annahme nach einem Fehlschlag als widerlegt
 
 # Ein Aufruf von Claude Code.
 #   -p / --print   Print-Modus: ein Aufruf, dann beendet sich der Prozess
@@ -261,8 +268,8 @@ readonly -a CLAUDE_ARGS=(
 )
 
 LP_TOKEN=
-NEXT='' NEXT_SRC='' LAST_TIME='' LAST_OK='' LAST_INFO=''
-P_OK=0 P_RESET='' P_INFO='' P_KEYSRC=''
+NEXT='' NEXT_SRC='' LAST_TIME='' LAST_OK='' LAST_INFO='' WEEKLY_MISS=''
+P_OK=0 P_RESET='' P_INFO='' P_KEYSRC='' P_WEEKLY=0
 
 fmt_time() {
   (( $1 == 0 )) && { printf 'sofort'; return; }
@@ -304,7 +311,7 @@ log() {  # $1 = info|warn|err, übrige Argumente = Text
 
 load_state() {
   local k v
-  NEXT='' NEXT_SRC='' LAST_TIME='' LAST_OK='' LAST_INFO=''
+  NEXT='' NEXT_SRC='' LAST_TIME='' LAST_OK='' LAST_INFO='' WEEKLY_MISS=''
   [[ -r $STATE_FILE ]] || return 1
   while IFS='=' read -r k v || [[ -n $k ]]; do
     case $k in
@@ -313,11 +320,13 @@ load_state() {
       LAST_TIME) LAST_TIME=$v ;;
       LAST_OK) LAST_OK=$v ;;
       LAST_INFO) LAST_INFO=$v ;;
+      WEEKLY_MISS) WEEKLY_MISS=$v ;;
     esac
   done <"$STATE_FILE"
   [[ $NEXT =~ ^[0-9]{1,12}$ ]] || return 1
   [[ $LAST_TIME =~ ^[0-9]{1,12}$ ]] || LAST_TIME=
-  [[ $NEXT_SRC =~ ^(first|reset|fallback|retry)$ ]] || NEXT_SRC=
+  [[ $WEEKLY_MISS =~ ^[0-9]{1,12}$ ]] || WEEKLY_MISS=
+  [[ $NEXT_SRC =~ ^(first|reset|fallback|retry|weekly)$ ]] || NEXT_SRC=
   return 0
 }
 
@@ -327,9 +336,9 @@ save_state() {
   {
     printf 'NEXT=%s\nNEXT_SRC=%s\n' "$NEXT" "$NEXT_SRC"
     printf 'LAST_TIME=%s\nLAST_OK=%s\n' "$LAST_TIME" "$LAST_OK"
-    printf 'LAST_INFO=%s\n' "$info"
+    printf 'LAST_INFO=%s\nWEEKLY_MISS=%s\n' "$info" "$WEEKLY_MISS"
   } >"$STATE_FILE.tmp" 2>/dev/null && mv -f "$STATE_FILE.tmp" "$STATE_FILE" \
-    || log warn "Zeitplan konnte nicht nach $STATE_FILE geschrieben werden."
+    || { log warn "Zeitplan konnte nicht nach $STATE_FILE geschrieben werden."; return 1; }
 }
 
 # Erster Puls: nächster 08:00 Uhr Europe/Berlin.
@@ -341,8 +350,20 @@ first_slot() {
   echo "$t"
 }
 
+# Nächster Wochen-Reset (samstags 15:00 Uhr Europe/Berlin) + BUFFER, der nach Zeitpunkt $1 liegt.
+weekly_slot() {
+  local now=$1 dow day days t
+  dow=$(date -d "@$now" +%u)
+  day=$(date -d "@$now" +%F)
+  days=$(( (WEEKLY_DOW - dow + 7) % 7 ))
+  t=$(date -d "$day $days days $WEEKLY_TIME" +%s)
+  (( t + BUFFER > now )) || t=$(date -d "$day $(( days + 7 )) days $WEEKLY_TIME" +%s)
+  echo $(( t + BUFFER ))
+}
+
 src_text() {
   case $1 in
+    weekly) echo "Wochenlimit erreicht, Reset laut Annahme samstags $WEEKLY_TIME Uhr (+ ${BUFFER} s Puffer)" ;;
     first) echo "erster Puls um 08:00 Uhr" ;;
     reset) echo "Reset des 5-Stunden-Fensters laut Claude Code (+ ${BUFFER} s Puffer)" ;;
     fallback) echo "letzte erfolgreiche Antwort + 5 h + ${BUFFER} s" ;;
@@ -364,6 +385,7 @@ def one(s):
 res = None
 resets = ""
 keysrc = ""
+weekly = 0
 try:
     f = open(sys.argv[1], encoding="utf-8", errors="replace")
 except OSError:
@@ -387,6 +409,8 @@ for line in f:
         i = m.get("rate_limit_info")
         if isinstance(i, dict):
             kind = i.get("rateLimitType", i.get("rate_limit_type"))
+            if kind == "seven_day" and i.get("status") == "rejected":
+                weekly = 1
             r = i.get("resetsAt", i.get("resets_at"))
             if kind in (None, "five_hour") and isinstance(r, (int, float)) and not isinstance(r, bool):
                 resets = str(int(r))
@@ -396,6 +420,8 @@ info = "keine Ergebnismeldung in der Ausgabe"
 if res is not None:
     text = res.get("result")
     text = text.strip() if isinstance(text, str) else ""
+    if "weekly limit" in text.lower():
+        weekly = 1
     if res.get("is_error"):
         info = one(text or res.get("subtype") or "Fehler")
     elif not text:
@@ -406,16 +432,17 @@ if res is not None:
 print("OK=%d" % ok)
 print("RESET=%s" % resets)
 print("KEYSRC=%s" % keysrc)
+print("WEEKLY=%d" % weekly)
 print("INFO=%s" % info)
 PY
 )
 
-# Ergebnis in P_OK, P_RESET, P_INFO, P_KEYSRC.
+# Ergebnis in P_OK, P_RESET, P_INFO, P_KEYSRC, P_WEEKLY (1 = Wochenlimit als Fehlerursache erkannt).
 # Rückgabe: 0 = Aufruf ausgewertet, 2 = dauerhaftes Problem (Token fehlt, oder Claude Code meldet
 # eine API-Anmeldequelle), Wiederholen sinnlos.
 pulse_once() {
   local tmp rc k v err token_file=${CREDENTIALS_DIRECTORY:-/nonexistent}/oauth-token
-  P_OK=0 P_RESET='' P_INFO='' P_KEYSRC=''
+  P_OK=0 P_RESET='' P_INFO='' P_KEYSRC='' P_WEEKLY=0
 
   LP_TOKEN=''
   [[ -r $token_file ]] && LP_TOKEN=$(<"$token_file")
@@ -454,6 +481,7 @@ pulse_once() {
       OK) P_OK=$v ;;
       RESET) P_RESET=$v ;;
       KEYSRC) P_KEYSRC=$v ;;
+      WEEKLY) P_WEEKLY=$v ;;
       INFO) P_INFO=$v ;;
     esac
   done < <(python3 -I -c "$PARSER" "$tmp/out" 2>/dev/null)
@@ -474,6 +502,7 @@ pulse_once() {
   else
     P_OK=0
     err=$(tr '\r\n' '  ' <"$tmp/err" | head -c 300)
+    [[ ${err,,} == *"weekly limit"* ]] && P_WEEKLY=1
     case $rc in
       124 | 137) P_INFO="Zeitüberschreitung nach ${ATTEMPT_TIMEOUT} s" ;;
       *) P_INFO="Exit-Code $rc${P_INFO:+; $P_INFO}${err:+; stderr: $err}" ;;
@@ -483,6 +512,28 @@ pulse_once() {
   P_INFO=$(scrub "$P_INFO")   # landet in Protokoll und Zeitplan-Datei (für alle lesbar)
   LP_TOKEN=''
   return 0
+}
+
+# Das Wochenlimit ist voll: Wiederholen bringt bis zum Reset nichts. Der Dienst wartet auf den
+# Wochen-Reset (samstags 15:00 Uhr + Puffer), damit der erste Puls danach das neue Fenster startet.
+# War dieser Termin selbst schon der Wochen-Termin und das Limit gilt noch, stimmt die Annahme
+# nicht (oder das Limit wurde sofort wieder verbraucht): dann gilt für 3 Tage der normale 5-h-Takt.
+weekly_limit_hit() {
+  local started=$1 now
+  printf -v now '%(%s)T' -1
+  LAST_TIME=$now LAST_OK=0
+  if [[ $NEXT_SRC == weekly ]] || { [[ -n $WEEKLY_MISS ]] && (( now - WEEKLY_MISS < WEEKLY_MISS_KEEP )); }; then
+    [[ $NEXT_SRC == weekly ]] && WEEKLY_MISS=$now
+    NEXT=$(( started + INTERVAL + BUFFER )); NEXT_SRC=retry
+    LAST_INFO="Wochenlimit besteht weiter, der Reset kam nicht wie angenommen; normaler 5-h-Takt"
+    save_state
+    log warn "Wochenlimit besteht weiter, obwohl der Wochen-Reset (samstags $WEEKLY_TIME Uhr) angenommen war. Annahme prüfen. Nächster Versuch: $(fmt_time "$NEXT")."
+  else
+    NEXT=$(weekly_slot "$now"); NEXT_SRC=weekly
+    LAST_INFO="Wochenlimit erreicht, wartet auf den Wochen-Reset"
+    save_state
+    log warn "Wochenlimit erreicht. Keine weiteren Versuche bis zum Wochen-Reset. Nächster Puls: $(fmt_time "$NEXT")."
+  fi
 }
 
 # Ein Puls: bis zu MAX_ATTEMPTS Versuche mit wachsenden Pausen, danach Fehler protokollieren.
@@ -504,6 +555,7 @@ run_pulse() {
         NEXT=$(( now + INTERVAL + BUFFER )); NEXT_SRC=fallback
       fi
       LAST_TIME=$now LAST_OK=1 LAST_INFO="Antwort \"$P_INFO\" (Versuch $attempt von $MAX_ATTEMPTS)"
+      WEEKLY_MISS=''
       save_state
       log info "Puls erfolgreich (Versuch $attempt/$MAX_ATTEMPTS, Antwort: \"$P_INFO\", Anmeldequelle laut Claude Code: ${P_KEYSRC:-unbekannt})."
       log info "Nächster Puls: $(fmt_time "$NEXT") – $(src_text "$NEXT_SRC")."
@@ -514,6 +566,10 @@ run_pulse() {
       break
     fi
     log warn "Versuch $attempt/$MAX_ATTEMPTS fehlgeschlagen: $P_INFO"
+    if [[ $P_WEEKLY == 1 ]]; then
+      weekly_limit_hit "$started"
+      return
+    fi
     if (( attempt < MAX_ATTEMPTS )); then
       pause=${PAUSES[attempt - 1]}
       log info "Neuer Versuch in $pause s."
@@ -629,10 +685,11 @@ cmd_token() {
 
   # Ist der letzte Puls gescheitert (meist wegen des alten Tokens), wird der Puls jetzt sofort
   # fällig statt erst zum nächsten Termin, sonst bliebe das Fenster bis zu 5 Stunden ungenutzt.
-  if load_state && [[ $LAST_OK == 0 ]]; then
+  # Nicht beim Wochenlimit: Dort hilft ein neuer Token nicht. Die Zeitplan-Datei gehört dem
+  # Dienst-Benutzer, deshalb ändert sie nicht root, sondern ein Aufruf als dieser Benutzer.
+  if load_state && [[ $LAST_OK == 0 && $NEXT_SRC != weekly ]]; then
     systemctl stop "$UNIT" 2>/dev/null
-    NEXT=0
-    save_state && chown "$APP_USER:$APP_USER" "$STATE_FILE" 2>/dev/null \
+    runuser -u "$APP_USER" -- "$(readlink -f "$0")" retry-now \
       && echo "Der letzte Puls war fehlgeschlagen und wird nach dem Start sofort wiederholt."
   fi
   if [[ ${1:-} != --no-restart ]] && systemctl is-enabled --quiet "$UNIT" 2>/dev/null; then
@@ -666,9 +723,17 @@ cmd_uninstall() {
   echo "Der Abo-Token bleibt bei Anthropic gültig, bis er abläuft oder in deinem Konto widerrufen wird."
 }
 
+# Intern: "limitpulse token" ruft das als Dienst-Benutzer auf. Macht den nächsten Puls sofort fällig.
+cmd_retry_now() {
+  load_state && [[ $LAST_OK == 0 ]] || return 1
+  NEXT=0 NEXT_SRC=retry
+  save_state
+}
+
 case ${1:-} in
   daemon) cmd_daemon ;;
   status) cmd_status ;;
+  retry-now) cmd_retry_now ;;
   token) cmd_token "${2:-}" ;;
   uninstall) cmd_uninstall ;;
   *)
@@ -722,9 +787,11 @@ echo "Claude Code $claude_version installiert."
 # --- Zeitplan -----------------------------------------------------------------
 
 if [[ ! -s $APP_HOME/state ]]; then
-  printf 'NEXT=%s\nNEXT_SRC=first\nLAST_TIME=\nLAST_OK=\nLAST_INFO=\n' "$anchor" >"$APP_HOME/state"
-  chown "$APP_USER:$APP_USER" "$APP_HOME/state"
-  chmod 644 "$APP_HOME/state"
+  # Als Dienst-Benutzer schreiben, nicht als root: so kann kein Symlink im Home root-Dateien überschreiben.
+  # shellcheck disable=SC2016  # "$1" und "$2" soll erst die innere Shell auswerten
+  ( cd "$APP_HOME" && runuser -u "$APP_USER" -- bash -c \
+      'umask 022; printf "NEXT=%s\nNEXT_SRC=first\nLAST_TIME=\nLAST_OK=\nLAST_INFO=\nWEEKLY_MISS=\n" "$1" >"$2"' \
+      _ "$anchor" "$APP_HOME/state" )
 fi
 
 # --- systemd-Dienst ------------------------------------------------------------

@@ -49,6 +49,12 @@ Das vollständige Protokoll zeigt `sudo journalctl -u limitpulse`.
 - **Fehler:** Bis zu 10 Versuche je Puls mit wachsenden Pausen (30 s bis 15 min, zusammen
   etwa 75 Minuten). Danach steht der Fehler im Protokoll, und der Dienst versucht es
   5 Stunden + 60 s nach Pulsbeginn erneut.
+- **Wochenlimit:** Scheitert ein Puls, weil das Wochenlimit voll ist (Meldung „weekly limit“
+  oder abgelehntes `seven_day`-Event), gibt es keine weiteren Versuche. Der Dienst wartet auf den
+  Wochen-Reset, den der Betreiber als samstags 15:00 Uhr beobachtet hat (+ 60 s Puffer), und
+  startet dann das neue Fenster. Die Uhrzeit ist eine Annahme, keine dokumentierte Zusage. Gilt das
+  Limit beim Wochen-Termin noch, fällt der Dienst für 3 Tage auf den normalen 5-Stunden-Takt zurück.
+  Das 5-Stunden-Limit löst diese Logik nicht aus.
 - **Neustart/Stromausfall:** Der Zeitplan liegt in `/var/lib/limitpulse/state`. Ein verpasster
   Puls wird nach dem Start sofort nachgeholt.
 - **Anmeldung:** Der Aufruf läuft mit leerem Environment. `ANTHROPIC_API_KEY`,
