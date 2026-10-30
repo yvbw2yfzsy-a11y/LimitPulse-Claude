@@ -54,8 +54,12 @@ rollback() {
   set +e
   [[ $finished == yes || $changed != yes ]] && return
   if [[ $fresh != yes ]]; then
-    echo "Die Installation ist fehlgeschlagen. Eine frühere LimitPulse-Installation war vorhanden und bleibt wie sie ist; sie kann unvollständig sein." >&2
-    echo "Zum Aufräumen:  sudo limitpulse uninstall   und danach dieses Skript erneut starten." >&2
+    # "limitpulse token" kann den Dienst schon gestoppt haben; ohne Neustart bliebe er bis zum nächsten Boot aus.
+    if systemctl is-enabled --quiet "$UNIT" 2>/dev/null && ! systemctl is-active --quiet "$UNIT" 2>/dev/null; then
+      systemctl start "$UNIT" 2>/dev/null
+    fi
+    echo "Die Installation ist fehlgeschlagen. Eine frühere LimitPulse-Installation war vorhanden; Programm und Token können bereits ersetzt sein. Der Dienst läuft weiter (falls er aktiviert war)." >&2
+    echo "Nach Behebung der Ursache dieses Skript erneut starten; der Zeitplan bleibt erhalten. Vollständig entfernen:  sudo limitpulse uninstall" >&2
     return
   fi
   echo "Die Installation ist fehlgeschlagen. Alles, was dieses Skript angelegt hat, wird wieder entfernt …" >&2
@@ -74,7 +78,7 @@ check_dir() {  # $1 = Verzeichnis, übrige Argumente = Namen, die darin vorkomme
   shift
   [[ -e $dir || -L $dir ]] || return 0
   [[ -d $dir && ! -L $dir ]] || die "$dir existiert bereits und ist kein Verzeichnis. Abbruch, nichts wurde verändert."
-  for entry in "$dir"/* "$dir"/.[!.]*; do
+  for entry in "$dir"/* "$dir"/.[!.]* "$dir"/..?*; do
     [[ -e $entry || -L $entry ]] || continue
     name=${entry##*/}
     allowed=no
@@ -95,6 +99,7 @@ arch=$(uname -m)
 
 os_id=; os_ver=
 if [[ -r /etc/os-release ]]; then
+  # shellcheck source=/dev/null  # Systemdatei, zur Laufzeit gelesen
   read -r os_id os_ver < <(. /etc/os-release; echo "${ID:-x} ${VERSION_ID:-0}")
 fi
 case $os_id in
@@ -124,7 +129,9 @@ done
 [[ -z $missing ]] \
   || die "Es fehlen Programme:$missing. Der Installer installiert keine Pakete; bitte vorher selbst installieren (z. B. sudo apt install curl python3) und das Skript erneut starten."
 [[ -f /usr/share/zoneinfo/Europe/Berlin ]] || die "Zeitzonendaten fehlen (Paket tzdata)."
-[[ -r /dev/tty ]] || die "Keine Konsole für die Eingabe des Tokens gefunden."
+# Öffnen statt nur -r prüfen: ohne steuerndes Terminal (z. B. "ssh host sudo bash install.sh" ohne -t)
+# existiert /dev/tty, lässt sich aber nicht öffnen; sonst bräche der Installer später mit Exit-Code 0 ab.
+{ : </dev/tty; } 2>/dev/null || die "Keine Konsole für die Eingabe des Tokens gefunden (bei SSH bitte \"ssh -t\" verwenden)."
 
 # Nichts überschreiben, was nicht von LimitPulse stammt.
 for f in "$APP" "$UNIT_FILE"; do
@@ -171,7 +178,7 @@ LimitPulse – Installation
 =========================
 Folgendes wird eingerichtet:
   Systembenutzer "$APP_USER" mit Home $APP_HOME
-  Claude Code im Home dieses Benutzers (offizieller Installer von claude.ai, Auto-Updates an)
+  Claude Code im Home dieses Benutzers (offizieller Installer von claude.ai, Auto-Updates an, zusätzlich täglich "claude update")
   $APP
   $TOKEN_FILE   (nur für root lesbar)
   $UNIT_FILE
@@ -239,11 +246,16 @@ readonly MAX_ATTEMPTS=10          # Versuche je Puls
 readonly PAUSES=(30 60 120 240 480 900 900 900 900)   # Pausen zwischen den Versuchen (Sekunden)
 readonly ATTEMPT_TIMEOUT=180      # Höchstdauer eines Aufrufs (Sekunden)
 readonly LOG_MAX_BYTES=262144
-# Wochenlimit: Der Reset kommt laut Beobachtung des Nutzers immer samstags um 15:00 Uhr (Europe/Berlin).
-# Das ist eine Annahme, keine dokumentierte Zusage. Stimmt sie nicht, fällt der Dienst von selbst auf den 5-h-Takt zurück.
+# Wochenlimit: Den Reset-Zeitpunkt meldet Claude Code im rate_limit_event. Nur wenn es keinen meldet, gilt die
+# Beobachtung des Nutzers: Reset samstags um 15:00 Uhr (Europe/Berlin). Das ist eine Annahme, keine dokumentierte
+# Zusage. Stimmt sie nicht, fällt der Dienst von selbst auf den 5-h-Takt zurück.
 readonly WEEKLY_DOW=6             # Wochentag des Resets als "date +%u": 6 = Samstag
 readonly WEEKLY_TIME=15:00
 readonly WEEKLY_MISS_KEEP=259200  # so lange (3 Tage) gilt die Annahme nach einem Fehlschlag als widerlegt
+# Ob die eingebauten Auto-Updates in den nur Sekunden laufenden Print-Aufrufen greifen, ist nicht dokumentiert.
+# Deshalb ruft der Dienst zusätzlich "claude update" auf (laut Doku der Weg, ein Update sofort einzuspielen).
+readonly UPDATE_EVERY=86400       # Abstand zwischen zwei "claude update" (Sekunden)
+readonly UPDATE_TIMEOUT=600       # Höchstdauer eines "claude update" (Sekunden)
 
 # Ein Aufruf von Claude Code.
 #   -p / --print   Print-Modus: ein Aufruf, dann beendet sich der Prozess
@@ -269,7 +281,7 @@ readonly -a CLAUDE_ARGS=(
 
 LP_TOKEN=
 NEXT='' NEXT_SRC='' LAST_TIME='' LAST_OK='' LAST_INFO='' WEEKLY_MISS=''
-P_OK=0 P_RESET='' P_INFO='' P_KEYSRC='' P_WEEKLY=0
+P_OK=0 P_RESET='' P_INFO='' P_KEYSRC='' P_WEEKLY=0 P_WRESET=''
 
 fmt_time() {
   (( $1 == 0 )) && { printf 'sofort'; return; }
@@ -333,6 +345,7 @@ load_state() {
 save_state() {
   local info
   info=$(scrub "$LAST_INFO" | tr -d '\r\n' | head -c 300)
+  # shellcheck disable=SC2015  # gewollt: die Warnung soll kommen, wenn Schreiben ODER Umbenennen scheitert
   {
     printf 'NEXT=%s\nNEXT_SRC=%s\n' "$NEXT" "$NEXT_SRC"
     printf 'LAST_TIME=%s\nLAST_OK=%s\n' "$LAST_TIME" "$LAST_OK"
@@ -363,7 +376,7 @@ weekly_slot() {
 
 src_text() {
   case $1 in
-    weekly) echo "Wochenlimit erreicht, Reset laut Annahme samstags $WEEKLY_TIME Uhr (+ ${BUFFER} s Puffer)" ;;
+    weekly) echo "Wochenlimit erreicht, Puls nach dem Wochen-Reset (laut Claude Code, sonst Annahme samstags $WEEKLY_TIME Uhr; + ${BUFFER} s Puffer)" ;;
     first) echo "erster Puls um 08:00 Uhr" ;;
     reset) echo "Reset des 5-Stunden-Fensters laut Claude Code (+ ${BUFFER} s Puffer)" ;;
     fallback) echo "letzte erfolgreiche Antwort + 5 h + ${BUFFER} s" ;;
@@ -375,15 +388,21 @@ src_text() {
 # --- Ein Aufruf von Claude Code ----------------------------------------------------
 
 # Wertet die stream-json-Ausgabe aus. Erfolg = Ergebnismeldung ohne Fehlerkennzeichen mit nicht leerer Antwort.
-# Reset-Zeit nur aus einem rate_limit_event des 5-Stunden-Fensters (Agent-SDK-Referenz: SDKRateLimitEvent).
+# Reset-Zeiten aus dem rate_limit_event (Agent-SDK-Referenz: SDKRateLimitEvent / RateLimitInfo):
+#   RESET  = 5-Stunden-Fenster (auch bei Ablehnung), WRESET = Wochenfenster, nur wenn das Wochenlimit greift.
 PARSER=$(cat <<'PY'
 import json, sys
 
 def one(s):
-    return " ".join(str(s).split())[:200]
+    # eine Zeile, höchstens 200 Zeichen, ohne Steuerzeichen (landet in Protokoll, Zeitplan und Terminal)
+    return "".join(c for c in " ".join(str(s).split()) if c.isprintable())[:200]
+
+def num(x):
+    return isinstance(x, (int, float)) and not isinstance(x, bool)
 
 res = None
 resets = ""
+wresets = ""
 keysrc = ""
 weekly = 0
 try:
@@ -409,11 +428,19 @@ for line in f:
         i = m.get("rate_limit_info")
         if isinstance(i, dict):
             kind = i.get("rateLimitType", i.get("rate_limit_type"))
+            r = i.get("resetsAt", i.get("resets_at"))
             if kind == "seven_day" and i.get("status") == "rejected":
                 weekly = 1
-            r = i.get("resetsAt", i.get("resets_at"))
-            if kind in (None, "five_hour") and isinstance(r, (int, float)) and not isinstance(r, bool):
+                if num(r):
+                    wresets = str(int(r))
+            if kind in (None, "five_hour") and num(r):
                 resets = str(int(r))
+            # Steht ein anderes Fenster im Vordergrund (z. B. Warnung zum Wochenlimit), steckt das 5-Stunden-Fenster
+            # in "unifiedWindows" (nicht dokumentiert, beobachtet in Claude Code 2.1.314).
+            w = i.get("unifiedWindows")
+            w5 = w.get("five_hour") if isinstance(w, dict) else None
+            if not resets and isinstance(w5, dict) and num(w5.get("resetsAt")):
+                resets = str(int(w5["resetsAt"]))
 
 ok = 0
 info = "keine Ergebnismeldung in der Ausgabe"
@@ -433,16 +460,18 @@ print("OK=%d" % ok)
 print("RESET=%s" % resets)
 print("KEYSRC=%s" % keysrc)
 print("WEEKLY=%d" % weekly)
+print("WRESET=%s" % wresets)
 print("INFO=%s" % info)
 PY
 )
 
-# Ergebnis in P_OK, P_RESET, P_INFO, P_KEYSRC, P_WEEKLY (1 = Wochenlimit als Fehlerursache erkannt).
-# Rückgabe: 0 = Aufruf ausgewertet, 2 = dauerhaftes Problem (Token fehlt, oder Claude Code meldet
-# eine API-Anmeldequelle), Wiederholen sinnlos.
+# Ergebnis in P_OK, P_RESET, P_INFO, P_KEYSRC, P_WEEKLY (1 = Wochenlimit als Fehlerursache erkannt),
+# P_WRESET (Wochen-Reset laut Claude Code). Rückgabe: 0 = Aufruf ausgewertet, 2 = dauerhaftes Problem
+# (Token fehlt, python3 fehlt, oder Claude Code würde über die API abrechnen), Wiederholen sinnlos.
 pulse_once() {
-  local tmp rc k v err token_file=${CREDENTIALS_DIRECTORY:-/nonexistent}/oauth-token
-  P_OK=0 P_RESET='' P_INFO='' P_KEYSRC='' P_WEEKLY=0
+  local tmp rc k v err f auth method provider token_file=${CREDENTIALS_DIRECTORY:-/nonexistent}/oauth-token
+  local re_method='"authMethod": *"([^"]*)"' re_provider='"apiProvider": *"([^"]*)"'
+  P_OK=0 P_RESET='' P_INFO='' P_KEYSRC='' P_WEEKLY=0 P_WRESET=''
 
   LP_TOKEN=''
   [[ -r $token_file ]] && LP_TOKEN=$(<"$token_file")
@@ -450,6 +479,44 @@ pulse_once() {
   if ! valid_token "$LP_TOKEN"; then
     LP_TOKEN=
     P_INFO="Abo-Token fehlt oder ist ungültig (neu setzen mit: sudo limitpulse token)"
+    return 2
+  fi
+
+  # Settings-Dateien können per "env" oder "apiKeyHelper" Anmeldung und Endpunkt ersetzen; Managed Settings
+  # gelten trotz --setting-sources. Das leere Environment unten schützt davor nicht: Claude Code würde den
+  # Abo-Token an einen fremden Host schicken oder über die API abrechnen. Dann lieber kein Aufruf.
+  for f in /etc/claude-code/managed-settings.json /etc/claude-code/managed-settings.d/*.json "$APP_HOME/.claude/settings.json"; do
+    [[ -e $f ]] || continue
+    if [[ ! -r $f ]] || grep -qE 'apiKeyHelper|ANTHROPIC_|CLAUDE_CODE_USE_|_BASE_URL' "$f"; then
+      LP_TOKEN=
+      P_INFO="$f kann Anmeldung oder Endpunkt von Claude Code ersetzen (API-Abrechnung oder Token an fremden Host). Puls nicht ausgeführt"
+      return 2
+    fi
+  done
+
+  if ! command -v python3 >/dev/null; then
+    LP_TOKEN=
+    P_INFO="python3 fehlt (wird zum Auswerten der Antwort von Claude Code gebraucht)"
+    return 2
+  fi
+
+  # Vorab ohne API-Aufruf: "claude auth status" zeigt, womit sich Claude Code anmelden würde. Bei API-Schlüssel,
+  # apiKeyHelper oder einem anderen Anbieter wird nichts gesendet; die Prüfung von apiKeySource weiter unten
+  # greift erst, wenn der abgerechnete Aufruf schon passiert ist. Ein Platzhalter genügt statt des echten Tokens.
+  auth=$(cd "$WORK_DIR" && exec env -i HOME="$APP_HOME" LANG=C.UTF-8 PATH=/usr/local/bin:/usr/bin:/bin \
+           DISABLE_TELEMETRY=1 DISABLE_ERROR_REPORTING=1 CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-probe \
+           timeout 60 "$CLAUDE" auth status --json 2>/dev/null </dev/null)
+  if [[ -z $auth ]]; then
+    LP_TOKEN=
+    P_INFO="\"claude auth status\" lieferte nichts (Claude Code fehlt, ist defekt oder hing)"
+    return 0
+  fi
+  method='' provider=''
+  [[ $auth =~ $re_method ]] && method=${BASH_REMATCH[1]//[^A-Za-z0-9_-]/}
+  [[ $auth =~ $re_provider ]] && provider=${BASH_REMATCH[1]//[^A-Za-z0-9_-]/}
+  if [[ $method != oauth_token || $provider != firstParty ]]; then
+    LP_TOKEN=
+    P_INFO="Claude Code würde sich nicht mit dem Abo-Token anmelden (claude auth status: authMethod=${method:-?}, apiProvider=${provider:-?}); das würde über die API abgerechnet. Puls nicht ausgeführt"
     return 2
   fi
 
@@ -472,6 +539,9 @@ pulse_once() {
     export CLAUDE_CODE_SKIP_PROMPT_HISTORY=1
     export CLAUDE_CODE_DISABLE_CLAUDE_MDS=1
     export CLAUDE_CODE_DISABLE_AUTO_MEMORY=1
+    # Keine Telemetrie und Fehlerberichte (sonst je Puls mehrere zusätzliche Verbindungen und, wenn der Versand
+    # scheitert, eine Datei von rund 200 KB). Nicht CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: das schaltet auch Updates ab.
+    export DISABLE_TELEMETRY=1 DISABLE_ERROR_REPORTING=1
     exec timeout --kill-after=10 "$ATTEMPT_TIMEOUT" "$CLAUDE" "${CLAUDE_ARGS[@]}"
   ) >"$tmp/out" 2>"$tmp/err" </dev/null
   rc=$?
@@ -482,12 +552,13 @@ pulse_once() {
       RESET) P_RESET=$v ;;
       KEYSRC) P_KEYSRC=$v ;;
       WEEKLY) P_WEEKLY=$v ;;
+      WRESET) P_WRESET=$v ;;
       INFO) P_INFO=$v ;;
     esac
   done < <(python3 -I -c "$PARSER" "$tmp/out" 2>/dev/null)
 
-  # Zweite Sicherung: meldet Claude Code (system/init, SDK-Referenz "ApiKeySource") eine API-Quelle,
-  # zählt der Puls nicht, und es gibt keine Wiederholung. Das Environment oben schließt das schon aus.
+  # Letzte Sicherung: meldet Claude Code (system/init, SDK-Referenz "ApiKeySource") eine API-Quelle,
+  # zählt der Puls nicht, und es gibt keine Wiederholung. Die Prüfungen vor dem Aufruf schließen das schon aus.
   case $P_KEYSRC in
     ANTHROPIC_API_KEY | apiKeyHelper | "/login managed key")
       rm -rf "$tmp"
@@ -501,7 +572,7 @@ pulse_once() {
     P_OK=1
   else
     P_OK=0
-    err=$(tr '\r\n' '  ' <"$tmp/err" | head -c 300)
+    err=$(tr '\r\n' '  ' <"$tmp/err" | tr -d '\000-\037\177' | head -c 300)
     [[ ${err,,} == *"weekly limit"* ]] && P_WEEKLY=1
     case $rc in
       124 | 137) P_INFO="Zeitüberschreitung nach ${ATTEMPT_TIMEOUT} s" ;;
@@ -514,15 +585,21 @@ pulse_once() {
   return 0
 }
 
-# Das Wochenlimit ist voll: Wiederholen bringt bis zum Reset nichts. Der Dienst wartet auf den
-# Wochen-Reset (samstags 15:00 Uhr + Puffer), damit der erste Puls danach das neue Fenster startet.
-# War dieser Termin selbst schon der Wochen-Termin und das Limit gilt noch, stimmt die Annahme
-# nicht (oder das Limit wurde sofort wieder verbraucht): dann gilt für 3 Tage der normale 5-h-Takt.
+# Das Wochenlimit ist voll: Wiederholen bringt bis zum Reset nichts. Der Dienst wartet auf den Wochen-Reset
+# laut Claude Code (+ Puffer), damit der erste Puls danach das neue Fenster startet. Meldet Claude Code keinen,
+# gilt die Annahme samstags 15:00 Uhr. War dieser Termin selbst schon der Wochen-Termin und das Limit gilt
+# noch, stimmt die Annahme nicht (oder das Limit wurde sofort wieder verbraucht): dann gilt für 3 Tage der
+# normale 5-h-Takt.
 weekly_limit_hit() {
   local started=$1 now
   printf -v now '%(%s)T' -1
   LAST_TIME=$now LAST_OK=0
-  if [[ $NEXT_SRC == weekly ]] || { [[ -n $WEEKLY_MISS ]] && (( now - WEEKLY_MISS < WEEKLY_MISS_KEEP )); }; then
+  if [[ $P_WRESET =~ ^[0-9]{1,12}$ ]] && (( P_WRESET > now && P_WRESET <= now + 7 * 86400 + 300 )); then
+    NEXT=$(( P_WRESET + BUFFER )); NEXT_SRC=weekly
+    LAST_INFO="Wochenlimit erreicht, wartet auf den Wochen-Reset laut Claude Code"
+    save_state
+    log warn "Wochenlimit erreicht. Keine weiteren Versuche bis zum Wochen-Reset laut Claude Code. Nächster Puls: $(fmt_time "$NEXT")."
+  elif [[ $NEXT_SRC == weekly ]] || { [[ -n $WEEKLY_MISS ]] && (( now - WEEKLY_MISS < WEEKLY_MISS_KEEP )); }; then
     [[ $NEXT_SRC == weekly ]] && WEEKLY_MISS=$now
     NEXT=$(( started + INTERVAL + BUFFER )); NEXT_SRC=retry
     LAST_INFO="Wochenlimit besteht weiter, der Reset kam nicht wie angenommen; normaler 5-h-Takt"
@@ -570,6 +647,16 @@ run_pulse() {
       weekly_limit_hit "$started"
       return
     fi
+    # Meldet Claude Code trotz Fehlschlag den Reset des 5-Stunden-Fensters (typisch: Fenster läuft schon und
+    # ist voll), bringen weitere Versuche nichts; der nächste Puls kommt direkt nach diesem Reset.
+    printf -v now '%(%s)T' -1
+    if [[ $P_RESET =~ ^[0-9]{1,12}$ ]] && (( P_RESET > now && P_RESET <= now + INTERVAL + 300 )); then
+      NEXT=$(( P_RESET + BUFFER )); NEXT_SRC=reset
+      LAST_TIME=$now LAST_OK=0 LAST_INFO="5-Stunden-Fenster läuft bereits und ist voll: $P_INFO"
+      save_state
+      log warn "Das 5-Stunden-Fenster läuft bereits und ist ausgeschöpft. Nächster Puls: $(fmt_time "$NEXT") – $(src_text "$NEXT_SRC")."
+      return
+    fi
     if (( attempt < MAX_ATTEMPTS )); then
       pause=${PAUSES[attempt - 1]}
       log info "Neuer Versuch in $pause s."
@@ -585,8 +672,23 @@ run_pulse() {
   log err "Nächster Versuch zum planmäßigen Zeitpunkt: $(fmt_time "$NEXT")."
 }
 
+# "claude update" als Dienst-Benutzer, ohne Token (ein Update braucht keine Anmeldung).
+update_claude() {
+  local out rc
+  out=$(cd "$WORK_DIR" && exec env -i HOME="$APP_HOME" LANG=C.UTF-8 PATH=/usr/local/bin:/usr/bin:/bin \
+          DISABLE_TELEMETRY=1 DISABLE_ERROR_REPORTING=1 \
+          timeout --kill-after=10 "$UPDATE_TIMEOUT" "$CLAUDE" update 2>&1 </dev/null)
+  rc=$?
+  out=$(printf '%s' "$out" | tr '\r\n' '  ' | tr -d '\000-\037\177' | head -c 200)
+  if (( rc != 0 )); then
+    log warn "\"claude update\" fehlgeschlagen (Exit-Code $rc): $out"
+  elif [[ $out == *"Successfully updated"* ]]; then
+    log info "Claude Code aktualisiert: $out"
+  fi
+}
+
 cmd_daemon() {
-  local now wait
+  local now wait last_update=0
   mkdir -p "$WORK_DIR" 2>/dev/null
   if ! load_state; then
     NEXT=$(first_slot); NEXT_SRC=first
@@ -600,6 +702,12 @@ cmd_daemon() {
     if (( now >= NEXT )); then
       (( NEXT > 0 && now - NEXT > 300 )) && log info "Geplanter Puls ($(fmt_time "$NEXT")) wurde verpasst, zum Beispiel durch einen Neustart. Er wird jetzt nachgeholt."
       run_pulse
+      continue
+    fi
+    # Update nur, wenn bis zum nächsten Puls genug Zeit bleibt; nach dem Start und danach einmal am Tag.
+    if (( now - last_update >= UPDATE_EVERY && NEXT - now > UPDATE_TIMEOUT + 60 )); then
+      last_update=$now
+      update_claude
       continue
     fi
     # Höchstens 60 s am Stück schlafen, damit Zeitkorrekturen (NTP) sofort greifen.
