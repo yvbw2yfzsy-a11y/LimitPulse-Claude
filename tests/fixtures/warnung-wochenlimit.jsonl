@@ -1,0 +1,4 @@
+{"type": "system", "subtype": "init", "apiKeySource": "none", "model": "claude-haiku-5-5", "claude_code_version": "2.1.314"}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "ok"}]}}
+{"type": "rate_limit_event", "rate_limit_info": {"status": "allowed_warning", "resetsAt": 1793633248, "rateLimitType": "seven_day", "utilization": 0.9, "isUsingOverage": false, "unifiedWindows": {"five_hour": {"utilization": 0.01, "resetsAt": 1793391921, "status": "allowed"}, "seven_day": {"utilization": 0.9, "resetsAt": 1793633248, "status": "allowed_warning"}}}}
+{"type": "result", "subtype": "success", "is_error": false, "result": "ok", "api_error_status": null, "terminal_reason": "completed"}
