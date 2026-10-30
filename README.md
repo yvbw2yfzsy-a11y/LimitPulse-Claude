@@ -26,6 +26,7 @@ sudo bash install.sh
 
 Der Installer fragt den Token verdeckt ab, richtet einen eigenen Systembenutzer
 `limitpulse` ein, installiert Claude Code in dessen Home und startet den Dienst.
+Er braucht ein Terminal: Wer ihn per SSH in einem Schritt startet, nimmt `ssh -t`.
 
 ## Bedienung
 
@@ -41,26 +42,38 @@ Das vollständige Protokoll zeigt `sudo journalctl -u limitpulse`.
 
 - **Puls:** ein Aufruf `claude -p "Hi"` mit Haiku 5.5 (`claude-haiku-5-5`), Aufwand `low`,
   ersetztem Systemprompt („Reply with exactly one word: ok“), ohne Tools, ohne MCP,
-  ohne Skills, ohne gespeicherte Sitzung. Danach beendet sich der Prozess.
-  Erfolg heißt: Exit-Code 0 und nicht leere Antwort.
+  ohne Skills, ohne gespeicherte Sitzung, ohne Telemetrie und Fehlerberichte. Danach beendet
+  sich der Prozess. Erfolg heißt: Exit-Code 0 und nicht leere Antwort.
 - **Nächster Puls:** Meldet Claude Code in der Ausgabe den Reset des 5-Stunden-Fensters
   (`rate_limit_event`, siehe Agent-SDK-Referenz), gilt dieser Zeitpunkt + 60 s. Sonst gilt:
   Zeitpunkt der letzten erfolgreichen Antwort + 5 Stunden + 60 s.
+- **Fenster schon voll:** Läuft beim Puls bereits ein ausgeschöpftes 5-Stunden-Fenster und meldet
+  Claude Code dessen Reset, gibt es keine weiteren Versuche; der nächste Puls kommt 60 s nach diesem Reset.
 - **Fehler:** Bis zu 10 Versuche je Puls mit wachsenden Pausen (30 s bis 15 min, zusammen
   etwa 75 Minuten). Danach steht der Fehler im Protokoll, und der Dienst versucht es
   5 Stunden + 60 s nach Pulsbeginn erneut.
 - **Wochenlimit:** Scheitert ein Puls, weil das Wochenlimit voll ist (Meldung „weekly limit“
   oder abgelehntes `seven_day`-Event), gibt es keine weiteren Versuche. Der Dienst wartet auf den
-  Wochen-Reset, den der Betreiber als samstags 15:00 Uhr beobachtet hat (+ 60 s Puffer), und
-  startet dann das neue Fenster. Die Uhrzeit ist eine Annahme, keine dokumentierte Zusage. Gilt das
-  Limit beim Wochen-Termin noch, fällt der Dienst für 3 Tage auf den normalen 5-Stunden-Takt zurück.
+  Wochen-Reset, den Claude Code im `rate_limit_event` meldet (+ 60 s Puffer), und startet dann das
+  neue Fenster. Meldet Claude Code keinen Zeitpunkt, gilt der vom Betreiber beobachtete Reset samstags
+  15:00 Uhr; das ist eine Annahme, keine dokumentierte Zusage. Gilt das Limit zu diesem angenommenen
+  Termin noch, fällt der Dienst für 3 Tage auf den normalen 5-Stunden-Takt zurück.
   Das 5-Stunden-Limit löst diese Logik nicht aus.
 - **Neustart/Stromausfall:** Der Zeitplan liegt in `/var/lib/limitpulse/state`. Ein verpasster
   Puls wird nach dem Start sofort nachgeholt.
 - **Anmeldung:** Der Aufruf läuft mit leerem Environment. `ANTHROPIC_API_KEY`,
   `ANTHROPIC_AUTH_TOKEN` und alle anderen Variablen werden entfernt. Beide haben laut Doku
   Vorrang vor `CLAUDE_CODE_OAUTH_TOKEN` und würden über die API abgerechnet.
-- **Updates:** Die automatischen Updates von Claude Code bleiben an.
+  Einstellungsdateien können solche Variablen trotzdem setzen (`env`, `apiKeyHelper`); Managed
+  Settings unter `/etc/claude-code/` gelten immer. Deshalb prüft der Dienst vor jedem Puls
+  `/etc/claude-code/managed-settings.json`, `/etc/claude-code/managed-settings.d/*.json` und
+  `/var/lib/limitpulse/.claude/settings.json` sowie `claude auth status` (ohne API-Aufruf).
+  Deutet etwas auf API-Schlüssel, anderen Anbieter oder anderen Endpunkt, sendet er nichts und
+  nennt den Grund im Protokoll.
+- **Updates:** Die automatischen Updates von Claude Code bleiben an. Weil nicht dokumentiert ist,
+  ob sie in den nur Sekunden laufenden Pulsen greifen, ruft der Dienst zusätzlich nach dem Start
+  und danach einmal täglich `claude update` auf.
+- **Proxy:** nicht vorgesehen. Installer und Dienst geben keine Proxy-Variablen weiter.
 
 ## Was die Installation verändert
 
@@ -81,3 +94,9 @@ einem frischen System fehl, baut er seine Änderungen wieder zurück.
 Der Dienst läuft als `limitpulse` mit systemd-Härtung (`ProtectSystem=strict`, nur das
 eigene Home schreibbar, keine Capabilities, `NoNewPrivileges`). Den Token stellt systemd
 über `LoadCredential` bereit; er steht weder in der Prozessliste noch im Protokoll.
+
+## Prüfungen
+
+`bash tests/run.sh` prüft ohne Netzwerk und ohne Änderungen am System: Syntax (`bash -n`),
+`shellcheck` für Installer und eingebettetes Programm sowie den Parser gegen Beispielausgaben
+von Claude Code (`tests/fixtures`). Dieselben Prüfungen laufen bei jedem Push als GitHub Action.

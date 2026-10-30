@@ -1,0 +1,5 @@
+{"type": "system", "subtype": "init", "apiKeySource": "none", "model": "claude-haiku-5-5", "claude_code_version": "2.1.314"}
+{"type": "system", "subtype": "api_retry", "attempt": 1, "max_retries": 2, "retry_delay_ms": 574, "error_status": 500, "error": "server_error"}
+{"type": "system", "subtype": "api_retry", "attempt": 2, "max_retries": 2, "retry_delay_ms": 1011, "error_status": 500, "error": "server_error"}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "API Error: 500 Internal server error. This is a server-side issue, usually temporary — try again in a moment. If it persists, check your inference gateway (127.0.0.1:8765)."}]}, "error": "server_error"}
+{"type": "result", "subtype": "success", "is_error": true, "result": "API Error: 500 Internal server error. This is a server-side issue, usually temporary — try again in a moment. If it persists, check your inference gateway (127.0.0.1:8765).", "api_error_status": 500, "terminal_reason": "api_error"}

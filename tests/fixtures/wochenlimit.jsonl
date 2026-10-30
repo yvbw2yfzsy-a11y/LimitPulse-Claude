@@ -1,0 +1,4 @@
+{"type": "system", "subtype": "init", "apiKeySource": "none", "model": "claude-haiku-5-5", "claude_code_version": "2.1.314"}
+{"type": "rate_limit_event", "rate_limit_info": {"status": "rejected", "resetsAt": 1793633197, "rateLimitType": "seven_day", "isUsingOverage": false, "unifiedWindows": {"five_hour": {"utilization": 0.01, "resetsAt": 1793391870, "status": "allowed"}, "seven_day": {"utilization": 1, "resetsAt": 1793633197, "status": "rejected"}}}}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "You've hit your weekly limit · resets Nov 2, 3:26pm (UTC)"}]}, "error": "rate_limit"}
+{"type": "result", "subtype": "success", "is_error": true, "result": "You've hit your weekly limit · resets Nov 2, 3:26pm (UTC)", "api_error_status": 429, "terminal_reason": "api_error"}
