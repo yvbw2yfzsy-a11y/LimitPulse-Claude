@@ -178,7 +178,7 @@ LimitPulse – Installation
 =========================
 Folgendes wird eingerichtet:
   Systembenutzer "$APP_USER" mit Home $APP_HOME
-  Claude Code im Home dieses Benutzers (offizieller Installer von claude.ai, Auto-Updates an, zusätzlich täglich "claude update")
+  Claude Code im Home dieses Benutzers (offizieller Installer von claude.ai, sofern nicht schon eine ausreichend neue Version da ist; Auto-Updates an, zusätzlich täglich "claude update")
   $APP
   $TOKEN_FILE   (nur für root lesbar)
   $UNIT_FILE
@@ -869,28 +869,46 @@ fi
 # --- Claude Code für den Dienst-Benutzer ----------------------------------------------
 
 echo
-echo "Lade den offiziellen Claude-Code-Installer von claude.ai …"
-dl=$(mktemp -d)
-curl -fsSL --connect-timeout 20 --max-time 120 -o "$dl/claude-install.sh" "$CLAUDE_INSTALL_URL" \
-  || { rm -rf "$dl"; die "Der Claude-Code-Installer konnte nicht von $CLAUDE_INSTALL_URL geladen werden (Netzwerk?)."; }
-[[ $(head -c 2 "$dl/claude-install.sh") == '#!' ]] \
-  || { rm -rf "$dl"; die "Von $CLAUDE_INSTALL_URL kam kein Installationsskript."; }
-echo "Installiere Claude Code für den Benutzer \"$APP_USER\" (kann einige Minuten dauern) …"
-# Erst vollständig laden, dann ausführen (statt "curl | bash"): ein abgebrochener Download läuft so nie halb.
-# Leeres Environment: nichts aus root's Umgebung gelangt in den Installer.
-( cd "$APP_HOME" && runuser -u "$APP_USER" -- env -i HOME="$APP_HOME" PATH="$SAFE_PATH" LANG=C.UTF-8 \
-    timeout 900 bash <"$dl/claude-install.sh" ) \
-  || { rm -rf "$dl"; die "Die Installation von Claude Code ist fehlgeschlagen."; }
-rm -rf "$dl"
+# Eine vorhandene Installation, die läuft und neu genug ist, bleibt unberührt: Sie wird durch die Auto-Updates und das
+# tägliche "claude update" des Dienstes aktuell gehalten. So braucht ein erneuter Lauf (z. B. für eine neue Skriptversion)
+# weder Netz noch claude.ai. Fehlt Claude Code, ist es defekt oder zu alt, wird es wie bei einer Erstinstallation eingerichtet.
+claude_version=
+claude_out=
+if [[ -x $CLAUDE ]]; then
+  claude_out=$(cd "$APP_HOME" && runuser -u "$APP_USER" -- env -i HOME="$APP_HOME" PATH="$SAFE_PATH" LANG=C.UTF-8 \
+    "$CLAUDE" --version 2>&1) || claude_out=
+  if [[ $claude_out =~ ([0-9]+\.[0-9]+\.[0-9]+) ]]; then claude_version=${BASH_REMATCH[1]}; fi
+fi
+claude_ok() {  # $1 = Version; wahr, wenn sie mindestens MIN_CLAUDE_VERSION ist
+  [[ -n $1 && $(printf '%s\n%s\n' "$MIN_CLAUDE_VERSION" "$1" | sort -V | head -n 1) == "$MIN_CLAUDE_VERSION" ]]
+}
 
-[[ -x $CLAUDE ]] || die "Claude Code wurde nicht nach $CLAUDE installiert."
-claude_out=$(cd "$APP_HOME" && runuser -u "$APP_USER" -- env -i HOME="$APP_HOME" PATH="$SAFE_PATH" LANG=C.UTF-8 \
-  "$CLAUDE" --version 2>&1) || die "\"claude --version\" schlägt fehl: $claude_out"
-[[ $claude_out =~ ([0-9]+\.[0-9]+\.[0-9]+) ]] || die "Die Claude-Code-Version ist nicht erkennbar: $claude_out"
-claude_version=${BASH_REMATCH[1]}
-[[ $(printf '%s\n%s\n' "$MIN_CLAUDE_VERSION" "$claude_version" | sort -V | head -n 1) == "$MIN_CLAUDE_VERSION" ]] \
-  || die "Claude Code $claude_version ist zu alt für Haiku 5.5 (benötigt $MIN_CLAUDE_VERSION oder neuer)."
-echo "Claude Code $claude_version installiert."
+if claude_ok "$claude_version"; then
+  echo "Claude Code $claude_version ist bereits installiert und neu genug; der Installer von claude.ai wird nicht erneut geladen."
+else
+  echo "Lade den offiziellen Claude-Code-Installer von claude.ai …"
+  dl=$(mktemp -d)
+  curl -fsSL --connect-timeout 20 --max-time 120 -o "$dl/claude-install.sh" "$CLAUDE_INSTALL_URL" \
+    || { rm -rf "$dl"; die "Der Claude-Code-Installer konnte nicht von $CLAUDE_INSTALL_URL geladen werden (Netzwerk?)."; }
+  [[ $(head -c 2 "$dl/claude-install.sh") == '#!' ]] \
+    || { rm -rf "$dl"; die "Von $CLAUDE_INSTALL_URL kam kein Installationsskript."; }
+  echo "Installiere Claude Code für den Benutzer \"$APP_USER\" (kann einige Minuten dauern) …"
+  # Erst vollständig laden, dann ausführen (statt "curl | bash"): ein abgebrochener Download läuft so nie halb.
+  # Leeres Environment: nichts aus root's Umgebung gelangt in den Installer.
+  ( cd "$APP_HOME" && runuser -u "$APP_USER" -- env -i HOME="$APP_HOME" PATH="$SAFE_PATH" LANG=C.UTF-8 \
+      timeout 900 bash <"$dl/claude-install.sh" ) \
+    || { rm -rf "$dl"; die "Die Installation von Claude Code ist fehlgeschlagen."; }
+  rm -rf "$dl"
+
+  [[ -x $CLAUDE ]] || die "Claude Code wurde nicht nach $CLAUDE installiert."
+  claude_out=$(cd "$APP_HOME" && runuser -u "$APP_USER" -- env -i HOME="$APP_HOME" PATH="$SAFE_PATH" LANG=C.UTF-8 \
+    "$CLAUDE" --version 2>&1) || die "\"claude --version\" schlägt fehl: $claude_out"
+  [[ $claude_out =~ ([0-9]+\.[0-9]+\.[0-9]+) ]] || die "Die Claude-Code-Version ist nicht erkennbar: $claude_out"
+  claude_version=${BASH_REMATCH[1]}
+  claude_ok "$claude_version" \
+    || die "Claude Code $claude_version ist zu alt für Haiku 5.5 (benötigt $MIN_CLAUDE_VERSION oder neuer)."
+  echo "Claude Code $claude_version installiert."
+fi
 
 # --- Zeitplan -----------------------------------------------------------------
 

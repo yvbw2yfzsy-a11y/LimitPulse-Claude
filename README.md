@@ -28,6 +28,11 @@ Der Installer fragt den Token verdeckt ab, richtet einen eigenen Systembenutzer
 `limitpulse` ein, installiert Claude Code in dessen Home und startet den Dienst.
 Er braucht ein Terminal: Wer ihn per SSH in einem Schritt startet, nimmt `ssh -t`.
 
+Der Installer lässt sich erneut ausführen, zum Beispiel für eine neue Skriptversion. Er ersetzt dann das
+Programm und die Unit; Zeitplan und Token bleiben auf Wunsch erhalten. Eine vorhandene Claude-Code-Installation,
+die läuft und neu genug ist, rührt er nicht an und lädt dafür nichts von claude.ai. Fehlt Claude Code, ist es
+defekt oder zu alt, installiert er es wie beim ersten Mal. Aktuell hält es der Dienst selbst (siehe „Updates“).
+
 ## Bedienung
 
 | Befehl | Wirkung |
@@ -97,6 +102,20 @@ eigene Home schreibbar, keine Capabilities, `NoNewPrivileges`). Den Token stellt
 
 ## Prüfungen
 
-`bash tests/run.sh` prüft ohne Netzwerk und ohne Änderungen am System: Syntax (`bash -n`),
-`shellcheck` für Installer und eingebettetes Programm sowie den Parser gegen Beispielausgaben
-von Claude Code (`tests/fixtures`). Dieselben Prüfungen laufen bei jedem Push als GitHub Action.
+`bash tests/run.sh` prüft ohne Netzwerk und ohne Änderungen am System:
+
+- Syntax (`bash -n`) für Installer und eingebettetes Programm,
+- den Parser gegen Beispielausgaben von Claude Code (`tests/fixtures`),
+- die Versionsprüfung und den Installationsschritt für Claude Code (`tests/claude-version.sh`, `tests/claude-install-step.sh`),
+- `shellcheck` für Installer, eingebettetes Programm und Tests. `shellcheck` muss installiert sein
+  (`sudo apt install shellcheck`); fehlt es, laufen die übrigen Prüfungen trotzdem und der Aufruf endet danach mit einer klaren Meldung.
+
+Dieselben Prüfungen laufen bei jedem Push als GitHub Action (`Prüfung`).
+
+`bash tests/smoke.sh` ist der Rauchtest gegen die **installierte** Claude-Code-Version (`claude` im `PATH` oder `CLAUDE_BIN=…`).
+Er führt `pulse_once` aus `install.sh` unverändert aus, mit denselben Flags und derselben Umgebung wie der Dienst. Nur Home,
+Pfad zu Claude Code und Token sind ersetzt; ein Wrapper richtet `ANTHROPIC_BASE_URL` auf einen lokalen Stub
+(`tests/stub_server.py`). Er prüft, dass der Aufruf klappt, genau eine Anfrage an `/v1/messages` geht (Modell
+`claude-haiku-5-5`, keine Tools, Aufwand `low`, Ausgabegrenze 4096), die Antwort als Erfolg zählt und die Reset-Zeit
+übernommen wird. Wegen der Auto-Updates läuft er außerdem jeden Montag als GitHub Action (`Rauchtest Claude Code`)
+gegen die jeweils neueste Version. Er sagt nichts darüber, ob die echte API genau diese Anfrage annimmt.
