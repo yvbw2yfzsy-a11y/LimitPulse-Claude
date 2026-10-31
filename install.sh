@@ -73,7 +73,7 @@ rollback() {
 }
 trap rollback EXIT
 
-check_dir() {  # $1 = Verzeichnis, übrige Argumente = Namen, die darin vorkommen dürfen
+check_dir() {  # $1 = Verzeichnis, übrige Argumente = Namen oder Glob-Muster, die darin vorkommen dürfen
   local dir=$1 entry name allowed a
   shift
   [[ -e $dir || -L $dir ]] || return 0
@@ -82,7 +82,8 @@ check_dir() {  # $1 = Verzeichnis, übrige Argumente = Namen, die darin vorkomme
     [[ -e $entry || -L $entry ]] || continue
     name=${entry##*/}
     allowed=no
-    for a in "$@"; do [[ $name == "$a" ]] && allowed=yes; done
+    # shellcheck disable=SC2053  # gewollt: $a ist ein Muster (Glob), Namen ohne Sonderzeichen gelten wörtlich
+    for a in "$@"; do [[ $name == $a ]] && allowed=yes; done
     [[ $allowed == yes ]] || die "$dir enthält die fremde Datei \"$name\". Abbruch, nichts wurde verändert."
   done
 }
@@ -146,7 +147,8 @@ if [[ ! -e $UNIT_FILE ]] && systemctl list-unit-files --no-legend "$UNIT" 2>/dev
   die "Ein anderer Dienst namens $UNIT existiert bereits. Abbruch, nichts wurde verändert."
 fi
 check_dir "$APP_DIR" limitpulse.sh limitpulse.sh.new
-check_dir "$CONF_DIR" oauth-token
+# Zweites Muster: Tempdatei von "limitpulse token" (mktemp), die ein Abbruch zwischen mktemp und mv zurücklassen kann.
+check_dir "$CONF_DIR" oauth-token '.oauth-token.??????'
 if pw=$(getent passwd "$APP_USER"); then
   IFS=: read -r _ _ _ _ pw_gecos pw_home _ <<<"$pw"
   [[ $pw_gecos == "$MARKER" && $pw_home == "$APP_HOME" ]] \
@@ -281,7 +283,7 @@ readonly -a CLAUDE_ARGS=(
 
 LP_TOKEN=
 NEXT='' NEXT_SRC='' LAST_TIME='' LAST_OK='' LAST_INFO='' WEEKLY_MISS=''
-P_OK=0 P_RESET='' P_INFO='' P_KEYSRC='' P_WEEKLY=0 P_WRESET=''
+P_OK=0 P_RESET='' P_FIVEREJ=0 P_INFO='' P_KEYSRC='' P_WEEKLY=0 P_WRESET=''
 
 fmt_time() {
   (( $1 == 0 )) && { printf 'sofort'; return; }
@@ -301,7 +303,8 @@ valid_token() { [[ $1 =~ ^[A-Za-z0-9_-]{20,512}$ && $1 != sk-ant-api* ]]; }
 # Token und alles, was wie ein Anthropic-Schlüssel aussieht, aus Texten entfernen.
 scrub() {
   local s=$1
-  [[ -n $LP_TOKEN ]] && s=${s//"$LP_TOKEN"/***}
+  # Auch den Token ohne Präfix "sk-ant-" maskieren: Ein präfixloses Fragment träfe die Regex unten nicht.
+  [[ -n $LP_TOKEN ]] && s=${s//"$LP_TOKEN"/***} && s=${s//"${LP_TOKEN#sk-ant-}"/***}
   printf '%s' "$s" | sed -E 's/sk-ant-[A-Za-z0-9_-]+/sk-ant-***/g'
 }
 
@@ -324,7 +327,8 @@ log() {  # $1 = info|warn|err, übrige Argumente = Text
 load_state() {
   local k v
   NEXT='' NEXT_SRC='' LAST_TIME='' LAST_OK='' LAST_INFO='' WEEKLY_MISS=''
-  [[ -r $STATE_FILE ]] || return 1
+  # Nur eine gewöhnliche Datei: kein Symlink (root liest sonst Fremdes) und keine FIFO (Lesen hinge ewig).
+  [[ -f $STATE_FILE && ! -L $STATE_FILE && -r $STATE_FILE ]] || return 1
   while IFS='=' read -r k v || [[ -n $k ]]; do
     case $k in
       NEXT) NEXT=$v ;;
@@ -390,6 +394,8 @@ src_text() {
 # Wertet die stream-json-Ausgabe aus. Erfolg = Ergebnismeldung ohne Fehlerkennzeichen mit nicht leerer Antwort.
 # Reset-Zeiten aus dem rate_limit_event (Agent-SDK-Referenz: SDKRateLimitEvent / RateLimitInfo):
 #   RESET  = 5-Stunden-Fenster (auch bei Ablehnung), WRESET = Wochenfenster, nur wenn das Wochenlimit greift.
+#   FIVEREJ = 1, wenn das 5-Stunden-Fenster laut Claude Code abgelehnt ("rejected") ist, also wirklich voll; bei
+#   "allowed" oder "allowed_warning" 0. Nur dann ist der Reset ein Grund, nach einem Fehlschlag nicht zu wiederholen.
 PARSER=$(cat <<'PY'
 import json, sys
 
@@ -405,6 +411,7 @@ resets = ""
 wresets = ""
 keysrc = ""
 weekly = 0
+five_rejected = 0
 try:
     f = open(sys.argv[1], encoding="utf-8", errors="replace")
 except OSError:
@@ -435,12 +442,14 @@ for line in f:
                     wresets = str(int(r))
             if kind in (None, "five_hour") and num(r):
                 resets = str(int(r))
+                five_rejected = 1 if i.get("status") == "rejected" else 0
             # Steht ein anderes Fenster im Vordergrund (z. B. Warnung zum Wochenlimit), steckt das 5-Stunden-Fenster
             # in "unifiedWindows" (nicht dokumentiert, beobachtet in Claude Code 2.1.314).
             w = i.get("unifiedWindows")
             w5 = w.get("five_hour") if isinstance(w, dict) else None
             if not resets and isinstance(w5, dict) and num(w5.get("resetsAt")):
                 resets = str(int(w5["resetsAt"]))
+                five_rejected = 1 if w5.get("status") == "rejected" else 0
 
 ok = 0
 info = "keine Ergebnismeldung in der Ausgabe"
@@ -458,6 +467,7 @@ if res is not None:
         info = one(text)[:40]
 print("OK=%d" % ok)
 print("RESET=%s" % resets)
+print("FIVEREJ=%d" % five_rejected)
 print("KEYSRC=%s" % keysrc)
 print("WEEKLY=%d" % weekly)
 print("WRESET=%s" % wresets)
@@ -465,13 +475,13 @@ print("INFO=%s" % info)
 PY
 )
 
-# Ergebnis in P_OK, P_RESET, P_INFO, P_KEYSRC, P_WEEKLY (1 = Wochenlimit als Fehlerursache erkannt),
-# P_WRESET (Wochen-Reset laut Claude Code). Rückgabe: 0 = Aufruf ausgewertet, 2 = dauerhaftes Problem
+# Ergebnis in P_OK, P_RESET, P_FIVEREJ (1 = 5-Stunden-Fenster abgelehnt), P_INFO, P_KEYSRC,
+# P_WEEKLY (1 = Wochenlimit als Fehlerursache erkannt), P_WRESET (Wochen-Reset laut Claude Code). Rückgabe: 0 = Aufruf ausgewertet, 2 = dauerhaftes Problem
 # (Token fehlt, python3 fehlt, oder Claude Code würde über die API abrechnen), Wiederholen sinnlos.
 pulse_once() {
   local tmp rc k v err f auth method provider token_file=${CREDENTIALS_DIRECTORY:-/nonexistent}/oauth-token
   local re_method='"authMethod": *"([^"]*)"' re_provider='"apiProvider": *"([^"]*)"'
-  P_OK=0 P_RESET='' P_INFO='' P_KEYSRC='' P_WEEKLY=0 P_WRESET=''
+  P_OK=0 P_RESET='' P_FIVEREJ=0 P_INFO='' P_KEYSRC='' P_WEEKLY=0 P_WRESET=''
 
   LP_TOKEN=''
   [[ -r $token_file ]] && LP_TOKEN=$(<"$token_file")
@@ -550,6 +560,7 @@ pulse_once() {
     case $k in
       OK) P_OK=$v ;;
       RESET) P_RESET=$v ;;
+      FIVEREJ) P_FIVEREJ=$v ;;
       KEYSRC) P_KEYSRC=$v ;;
       WEEKLY) P_WEEKLY=$v ;;
       WRESET) P_WRESET=$v ;;
@@ -647,10 +658,12 @@ run_pulse() {
       weekly_limit_hit "$started"
       return
     fi
-    # Meldet Claude Code trotz Fehlschlag den Reset des 5-Stunden-Fensters (typisch: Fenster läuft schon und
-    # ist voll), bringen weitere Versuche nichts; der nächste Puls kommt direkt nach diesem Reset.
+    # Meldet Claude Code, dass das 5-Stunden-Fenster abgelehnt ist (Fenster läuft schon und ist voll), und nennt
+    # dessen Reset, bringen weitere Versuche nichts; der nächste Puls kommt direkt nach diesem Reset. Ein Reset bei
+    # Status "allowed" gehört zu einem gesunden Fenster: dann war der Fehler etwas anderes (z. B. 529) und es gibt
+    # die normalen Wiederholungen.
     printf -v now '%(%s)T' -1
-    if [[ $P_RESET =~ ^[0-9]{1,12}$ ]] && (( P_RESET > now && P_RESET <= now + INTERVAL + 300 )); then
+    if [[ $P_FIVEREJ == 1 && $P_RESET =~ ^[0-9]{1,12}$ ]] && (( P_RESET > now && P_RESET <= now + INTERVAL + 300 )); then
       NEXT=$(( P_RESET + BUFFER )); NEXT_SRC=reset
       LAST_TIME=$now LAST_OK=0 LAST_INFO="5-Stunden-Fenster läuft bereits und ist voll: $P_INFO"
       save_state
@@ -781,6 +794,7 @@ cmd_token() {
   local tmp
   [[ $EUID -eq 0 ]] || { echo "Bitte mit sudo ausführen: sudo limitpulse token" >&2; return 1; }
   read_token || return 1
+  rm -f "$CONF_DIR"/.oauth-token.?????? 2>/dev/null   # Reste eines früheren, abgebrochenen Aufrufs
   tmp=$(mktemp "$CONF_DIR/.oauth-token.XXXXXX") || return 1
   if ! { printf '%s\n' "$NEW_TOKEN" >"$tmp" && chmod 600 "$tmp" && mv -f "$tmp" "$TOKEN_FILE"; }; then
     rm -f "$tmp"
@@ -795,8 +809,10 @@ cmd_token() {
   # fällig statt erst zum nächsten Termin, sonst bliebe das Fenster bis zu 5 Stunden ungenutzt.
   # Nicht beim Wochenlimit: Dort hilft ein neuer Token nicht. Die Zeitplan-Datei gehört dem
   # Dienst-Benutzer, deshalb ändert sie nicht root, sondern ein Aufruf als dieser Benutzer.
+  # Mit --no-restart (Installer) bleibt der Dienst unangetastet: Der Installer startet ihn am Ende selbst neu
+  # und der Neustart liest dann den geänderten Zeitplan.
   if load_state && [[ $LAST_OK == 0 && $NEXT_SRC != weekly ]]; then
-    systemctl stop "$UNIT" 2>/dev/null
+    if [[ ${1:-} != --no-restart ]]; then systemctl stop "$UNIT" 2>/dev/null; fi
     runuser -u "$APP_USER" -- "$(readlink -f "$0")" retry-now \
       && echo "Der letzte Puls war fehlgeschlagen und wird nach dem Start sofort wiederholt."
   fi

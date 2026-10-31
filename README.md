@@ -52,8 +52,10 @@ Das vollständige Protokoll zeigt `sudo journalctl -u limitpulse`.
 - **Nächster Puls:** Meldet Claude Code in der Ausgabe den Reset des 5-Stunden-Fensters
   (`rate_limit_event`, siehe Agent-SDK-Referenz), gilt dieser Zeitpunkt + 60 s. Sonst gilt:
   Zeitpunkt der letzten erfolgreichen Antwort + 5 Stunden + 60 s.
-- **Fenster schon voll:** Läuft beim Puls bereits ein ausgeschöpftes 5-Stunden-Fenster und meldet
-  Claude Code dessen Reset, gibt es keine weiteren Versuche; der nächste Puls kommt 60 s nach diesem Reset.
+- **Fenster schon voll:** Läuft beim Puls bereits ein ausgeschöpftes 5-Stunden-Fenster (`rate_limit_event`
+  mit Status `rejected`) und meldet Claude Code dessen Reset, gibt es keine weiteren Versuche; der nächste Puls
+  kommt 60 s nach diesem Reset. Meldet Claude Code bei einem Fehler nur einen Reset mit Status `allowed` (Fenster
+  nicht voll, Fehlerursache also etwas anderes, z. B. HTTP 529), gelten die normalen Wiederholungen.
 - **Fehler:** Bis zu 10 Versuche je Puls mit wachsenden Pausen (30 s bis 15 min, zusammen
   etwa 75 Minuten). Danach steht der Fehler im Protokoll, und der Dienst versucht es
   5 Stunden + 60 s nach Pulsbeginn erneut.
@@ -99,6 +101,14 @@ einem frischen System fehl, baut er seine Änderungen wieder zurück.
 Der Dienst läuft als `limitpulse` mit systemd-Härtung (`ProtectSystem=strict`, nur das
 eigene Home schreibbar, keine Capabilities, `NoNewPrivileges`). Den Token stellt systemd
 über `LoadCredential` bereit; er steht weder in der Prozessliste noch im Protokoll.
+
+Bekanntes Restrisiko: `/var/lib/limitpulse/state` und `limitpulse.log` sind für alle lokalen Benutzer lesbar (644),
+damit `limitpulse status` ohne `sudo` läuft. Sie enthalten Zeitplan und gekürzte Meldungen von Claude Code (Token und
+Schlüssel sind maskiert), aber keinen Token. Auf einem Rechner mit weiteren, nicht vertrauenswürdigen lokalen Benutzern
+lässt sich das einschränken: `sudo systemctl edit limitpulse.service` und darin `[Service]` mit
+`StateDirectoryMode=0750` eintragen (die Ergänzung überlebt eine erneute Installation, die Unit selbst nicht). Dann
+kommen nur `limitpulse` und root an das Verzeichnis, und auch `limitpulse status` braucht `sudo`. Dateirechte einzeln zu
+ändern hilft nicht: Der Dienst legt `state` bei jedem Speichern neu an. Diese Einschränkung ist nicht getestet.
 
 ## Prüfungen
 
