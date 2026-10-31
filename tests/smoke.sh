@@ -20,7 +20,7 @@ real=$(readlink -f "$real")
 
 tmp=$(mktemp -d)
 srv=
-# shellcheck disable=SC2329  # Aufruf über trap
+# shellcheck disable=SC2317,SC2329  # Aufruf über trap
 cleanup() {
   if [[ -n $srv ]]; then kill "$srv" 2>/dev/null || true; fi
   rm -rf "$tmp"
@@ -77,7 +77,7 @@ check() {  # $1 = Beschreibung, übrige Argumente = Bedingung
 check "pulse_once wertet den Aufruf aus (Rückgabe 0)" test "$rc" -eq 0
 check "Puls gilt als erfolgreich (Antwort: \"$P_INFO\")" test "$P_OK" -eq 1
 check "Antwort ist \"ok\"" test "$P_INFO" = ok
-# shellcheck disable=SC2329  # Aufruf über check()
+# shellcheck disable=SC2317,SC2329  # Aufruf über check()
 not_api_source() {  # dieselben Quellen, die pulse_once als API-Abrechnung ablehnt
   case $1 in ANTHROPIC_API_KEY | apiKeyHelper | "/login managed key") return 1 ;; esac
 }

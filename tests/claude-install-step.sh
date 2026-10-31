@@ -24,7 +24,7 @@ run_case() {  # $1 = Ausgabe von "claude --version" ("" = Datei fehlt, "kaputt" 
     printf '#!/bin/sh\necho "%s (Claude Code)"\n' "$1" >"$tmp/case/home/claude"
   fi
   [[ -e $tmp/case/home/claude ]] && chmod 755 "$tmp/case/home/claude"
-  # shellcheck disable=SC2034,SC2329  # Variablen und Funktionen nutzt der eingelesene Abschnitt
+  # shellcheck disable=SC2034,SC2317,SC2329  # Variablen und Funktionen nutzt der eingelesene Abschnitt
   (
     APP_HOME=$tmp/case/home APP_USER=x SAFE_PATH=/usr/bin:/bin CLAUDE=$tmp/case/home/claude
     CLAUDE_INSTALL_URL=http://invalid.example/install.sh
