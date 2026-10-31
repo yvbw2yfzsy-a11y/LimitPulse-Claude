@@ -1,0 +1,33 @@
+name: Rauchtest Claude Code
+
+# Auto-Updates von Claude Code sind auf dem Pi an. Dieser Lauf installiert die jeweils neueste Version und prüft,
+# ob der Dienst sie weiter richtig aufruft und auswertet (tests/smoke.sh, gegen einen lokalen Stub, ohne API-Zugriff).
+
+on:
+  schedule:
+    - cron: "17 5 * * 1"   # montags, 05:17 UTC
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - install.sh
+      - tests/**
+      - .github/workflows/claude-code-smoke.yml
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Claude Code installieren (offizieller Installer, wie auf dem Pi)
+        run: |
+          curl -fsSL --connect-timeout 20 --max-time 120 -o "$RUNNER_TEMP/claude-install.sh" https://claude.ai/install.sh
+          head -c 2 "$RUNNER_TEMP/claude-install.sh" | grep -q '^#!'
+          bash "$RUNNER_TEMP/claude-install.sh"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Rauchtest
+        run: |
+          claude --version
+          bash tests/smoke.sh
