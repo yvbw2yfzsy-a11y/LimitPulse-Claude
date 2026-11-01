@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Prüft den in install.sh eingebetteten Parser (PARSER) gegen Beispielausgaben von Claude Code.
-# Die Beispiele unter tests/fixtures stammen aus Claude Code 2.1.314 (stream-json, gekürzt), aufgenommen
-# gegen einen lokalen Stub-Server statt der echten API.
+# Die Beispiele unter tests/fixtures stammen aus Claude Code 2.1.314 (anmeldung-abgelehnt: 2.1.316; stream-json,
+# gekürzt), aufgenommen gegen einen lokalen Stub-Server statt der echten API. steuerzeichen ist von Hand gebaut.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

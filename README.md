@@ -29,7 +29,7 @@ Der Installer fragt den Token verdeckt ab, richtet einen eigenen Systembenutzer
 Er braucht ein Terminal: Wer ihn per SSH in einem Schritt startet, nimmt `ssh -t`.
 
 Der Installer lässt sich erneut ausführen, zum Beispiel für eine neue Skriptversion. Er ersetzt dann das
-Programm und die Unit; Zeitplan und Token bleiben auf Wunsch erhalten. Eine vorhandene Claude-Code-Installation,
+Programm und die Unit; der Zeitplan bleibt erhalten, der Token auf Wunsch. Eine vorhandene Claude-Code-Installation,
 die läuft und neu genug ist, rührt er nicht an und lädt dafür nichts von claude.ai. Fehlt Claude Code, ist es
 defekt oder zu alt, installiert er es wie beim ersten Mal. Aktuell hält es der Dienst selbst (siehe „Updates“).
 
@@ -38,7 +38,7 @@ defekt oder zu alt, installiert er es wie beim ersten Mal. Aktuell hält es der 
 | Befehl | Wirkung |
 |---|---|
 | `limitpulse status` | Dienstzustand, letzter und nächster Puls, letzte Meldungen |
-| `sudo limitpulse token` | Abo-Token ändern; war der letzte Puls fehlgeschlagen, wird er sofort wiederholt |
+| `sudo limitpulse token` | Abo-Token ändern; war der letzte Puls fehlgeschlagen, wird er sofort wiederholt (außer beim Wochenlimit) |
 | `sudo limitpulse uninstall` | alles entfernen, einschließlich der Claude-Code-Installation des Dienstes |
 
 Das vollständige Protokoll zeigt `sudo journalctl -u limitpulse`.
@@ -59,6 +59,10 @@ Das vollständige Protokoll zeigt `sudo journalctl -u limitpulse`.
 - **Fehler:** Bis zu 10 Versuche je Puls mit wachsenden Pausen (30 s bis 15 min, zusammen
   etwa 75 Minuten). Danach steht der Fehler im Protokoll, und der Dienst versucht es
   5 Stunden + 60 s nach Pulsbeginn erneut.
+- **Token abgelaufen oder widerrufen:** Lehnt die API die Anmeldung ab (HTTP 401, z. B. wenn der Token
+  nach einem Jahr abgelaufen ist), gibt es keine weiteren Versuche; Protokoll und `limitpulse status` nennen
+  `sudo limitpulse token`. Ist der neue Token gespeichert, wird der Puls sofort wiederholt. Ohne neuen Token
+  versucht es der Dienst 5 Stunden + 60 s nach Pulsbeginn erneut.
 - **Wochenlimit:** Scheitert ein Puls, weil das Wochenlimit voll ist (Meldung „weekly limit“
   oder abgelehntes `seven_day`-Event), gibt es keine weiteren Versuche. Der Dienst wartet auf den
   Wochen-Reset, den Claude Code im `rate_limit_event` meldet (+ 60 s Puffer), und startet dann das
@@ -119,7 +123,7 @@ kommen nur `limitpulse` und root an das Verzeichnis, und auch `limitpulse status
 - den Parser gegen Beispielausgaben von Claude Code (`tests/fixtures`),
 - die Versionsprüfung und den Installationsschritt für Claude Code (`tests/claude-version.sh`, `tests/claude-install-step.sh`),
 - die Zeitplanlogik gegen einen Nachbau von Claude Code (`tests/schedule.sh`): Zeitplan-Datei, Wochen-Reset, Erfolg, volles Fenster,
-  Wochenlimit, Fehlerserie mit Pausen, Abbruchgründe,
+  Wochenlimit, Fehlerserie mit Pausen, Abbruchgründe (auch abgelehnte Anmeldung), sofortige Wiederholung nach neuem Token,
 - `shellcheck` für Installer, eingebettetes Programm und Tests. `shellcheck` muss installiert sein
   (`sudo apt install shellcheck`); fehlt es, laufen die übrigen Prüfungen trotzdem und der Aufruf endet danach mit einer klaren Meldung.
 
@@ -130,5 +134,6 @@ Er führt `pulse_once` aus `install.sh` unverändert aus, mit denselben Flags un
 Pfad zu Claude Code und Token sind ersetzt; ein Wrapper richtet `ANTHROPIC_BASE_URL` auf einen lokalen Stub
 (`tests/stub_server.py`). Er prüft, dass der Aufruf klappt, genau eine Anfrage an `/v1/messages` geht (Modell
 `claude-haiku-5-5`, keine Tools, Aufwand `low`, Ausgabegrenze 4096), die Antwort als Erfolg zählt und die Reset-Zeit
-übernommen wird. Wegen der Auto-Updates läuft er außerdem jeden Montag als GitHub Action (`Rauchtest Claude Code`)
-gegen die jeweils neueste Version. Er sagt nichts darüber, ob die echte API genau diese Anfrage annimmt.
+übernommen wird. Danach antwortet der Stub mit den Fehlern, die den Zeitplan steuern (5-Stunden-Fenster voll, Wochenlimit,
+Anmeldung abgelehnt), und der Test prüft, dass `pulse_once` sie erkennt. Wegen der Auto-Updates läuft er außerdem
+jeden Montag als GitHub Action (`Rauchtest Claude Code`) gegen die jeweils neueste Version. Er sagt nichts darüber, ob die echte API genau diese Anfrage annimmt.
