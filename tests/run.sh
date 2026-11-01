@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Alle Prüfungen ohne Netzwerk und ohne Systemänderung: Syntax, Parser, Claude-Code-Installationsschritt, shellcheck.
+# Alle Prüfungen ohne Netzwerk und ohne Systemänderung: Syntax, Parser, Claude-Code-Installationsschritt, Zeitplanlogik, shellcheck.
 # Der Rauchtest gegen eine installierte Claude-Code-Version (tests/smoke.sh) läuft getrennt, weil er Claude Code braucht.
 # Aufruf: bash tests/run.sh
 set -euo pipefail
@@ -19,6 +19,7 @@ echo "ok      bash -n"
 bash tests/parser.sh
 bash tests/claude-version.sh
 bash tests/claude-install-step.sh
+bash tests/schedule.sh
 
 # Das Programm shellcheck kommt zuletzt und mit klarer Meldung: Alle anderen Prüfungen sind dann schon gelaufen.
 if ! command -v shellcheck >/dev/null; then

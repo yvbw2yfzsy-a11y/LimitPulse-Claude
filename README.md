@@ -106,7 +106,8 @@ Bekanntes Restrisiko: `/var/lib/limitpulse/state` und `limitpulse.log` sind für
 damit `limitpulse status` ohne `sudo` läuft. Sie enthalten Zeitplan und gekürzte Meldungen von Claude Code (Token und
 Schlüssel sind maskiert), aber keinen Token. Auf einem Rechner mit weiteren, nicht vertrauenswürdigen lokalen Benutzern
 lässt sich das einschränken: `sudo systemctl edit limitpulse.service` und darin `[Service]` mit
-`StateDirectoryMode=0750` eintragen (die Ergänzung überlebt eine erneute Installation, die Unit selbst nicht). Dann
+`StateDirectoryMode=0750` eintragen (die Ergänzung überlebt eine erneute Installation, die Unit selbst nicht; `sudo limitpulse uninstall`
+entfernt sie mit). Dann
 kommen nur `limitpulse` und root an das Verzeichnis, und auch `limitpulse status` braucht `sudo`. Dateirechte einzeln zu
 ändern hilft nicht: Der Dienst legt `state` bei jedem Speichern neu an. Diese Einschränkung ist nicht getestet.
 
@@ -117,6 +118,8 @@ kommen nur `limitpulse` und root an das Verzeichnis, und auch `limitpulse status
 - Syntax (`bash -n`) für Installer und eingebettetes Programm,
 - den Parser gegen Beispielausgaben von Claude Code (`tests/fixtures`),
 - die Versionsprüfung und den Installationsschritt für Claude Code (`tests/claude-version.sh`, `tests/claude-install-step.sh`),
+- die Zeitplanlogik gegen einen Nachbau von Claude Code (`tests/schedule.sh`): Zeitplan-Datei, Wochen-Reset, Erfolg, volles Fenster,
+  Wochenlimit, Fehlerserie mit Pausen, Abbruchgründe,
 - `shellcheck` für Installer, eingebettetes Programm und Tests. `shellcheck` muss installiert sein
   (`sudo apt install shellcheck`); fehlt es, laufen die übrigen Prüfungen trotzdem und der Aufruf endet danach mit einer klaren Meldung.
 
