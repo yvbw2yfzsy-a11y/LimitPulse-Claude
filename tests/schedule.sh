@@ -62,6 +62,7 @@ expect_between() {  # $1 = Beschreibung, $2 = untere Grenze, $3 = obere Grenze, 
 
 state() { printf '%s\n' "$@" >"$STATE_FILE"; }
 load() { load_state && echo "ja NEXT=$NEXT LAST_TIME=$LAST_TIME" || echo "nein"; }
+saved() { load_state && echo "NEXT=$NEXT SRC=$NEXT_SRC INFO=$LAST_INFO" || echo "kein Zeitplan"; }
 
 state NEXT=1793516400 NEXT_SRC=first LAST_TIME=1793490000 LAST_OK=1 'LAST_INFO=a=b' WEEKLY_MISS=
 expect "load_state: gültiger Zeitplan" "ja NEXT=1793516400 LAST_TIME=1793490000" "$(load)"
@@ -111,6 +112,7 @@ err() {  # $1 = Meldung
 }
 
 # Führt einen Puls in einer Untershell aus und gibt aus: Quelle, Erfolg, Versuche, Pausen, NEXT relativ zum Start.
+# LAST_INFO nach dem Puls steht in $tmp/info.
 # $1 = Quelle des Zeitplans vor dem Puls, $2 = WEEKLY_MISS vor dem Puls
 pulse() {
   (
@@ -118,6 +120,7 @@ pulse() {
     NEXT=$t0 NEXT_SRC=${1:-first} LAST_TIME='' LAST_OK='' LAST_INFO='' WEEKLY_MISS=${2:-}
     SLEPT=()
     run_pulse >/dev/null
+    printf '%s\n' "$LAST_INFO" >"$tmp/info"
     echo "SRC=$NEXT_SRC OK=$LAST_OK TRIES=$(cat "$tmp/n" 2>/dev/null || echo 0) SLEEPS=${SLEPT[*]} NEXT=$NEXT MISS=${WEEKLY_MISS:+ja}"
   )
 }
@@ -204,5 +207,30 @@ prepare
 r=$(pulse)
 expect "API-Schlüssel als Anmeldequelle: Puls zählt nicht, keine Wiederholung" "retry 0 1 " \
   "$(field SRC "$r") $(field OK "$r") $(field TRIES "$r") $(sed -n 's/.*SLEEPS=\(.*\) NEXT=.*/\1/p' <<<"$r")"
+
+prepare
+{ echo "$init"
+  echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Not logged in · Please run /login"}]},"error":"authentication_failed"}'
+  echo '{"type":"result","subtype":"success","is_error":true,"result":"Not logged in · Please run /login","api_error_status":401}'
+} >"$tmp/att/1.jsonl"
+echo 1 >"$tmp/att/1.rc"
+r=$(pulse)
+expect "Anmeldung abgelehnt (401): keine Wiederholung, nächster Versuch nach 5 h" "retry 0 1 " \
+  "$(field SRC "$r") $(field OK "$r") $(field TRIES "$r") $(sed -n 's/.*SLEEPS=\(.*\) NEXT=.*/\1/p' <<<"$r")"
+expect_between "Anmeldung abgelehnt (401): Zeitpunkt" $(( t0 + 18060 )) $(( t0 + 18090 )) "$(field NEXT "$r")"
+got=$(<"$tmp/info")
+expect "Anmeldung abgelehnt (401): Zeitplan nennt den Weg zum neuen Token" ja \
+  "$([[ $got == *"sudo limitpulse token"* ]] && echo ja || echo "nein: $got")"
+
+# --- retry-now (ruft "limitpulse token" nach dem Speichern eines neuen Tokens auf) --------------------
+
+state NEXT=1793516400 NEXT_SRC=retry LAST_TIME=1793490000 LAST_OK=0 'LAST_INFO=Puls fehlgeschlagen' WEEKLY_MISS=
+( cmd_retry_now ) >/dev/null
+expect "retry-now nach Fehlschlag: Puls sofort fällig" "NEXT=0 SRC=token INFO=Puls fehlgeschlagen" "$(saved)"
+state NEXT=1793516400 NEXT_SRC=reset LAST_TIME=1793490000 LAST_OK=1 'LAST_INFO=Antwort "ok"' WEEKLY_MISS=
+( cmd_retry_now ) >/dev/null
+rc=$?
+expect "retry-now nach Erfolg: Zeitplan bleibt" 'rc=1 NEXT=1793516400 SRC=reset INFO=Antwort "ok"' "rc=$rc $(saved)"
+rm -f "$STATE_FILE"
 
 exit "$fail"

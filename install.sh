@@ -283,7 +283,7 @@ readonly -a CLAUDE_ARGS=(
 
 LP_TOKEN=
 NEXT='' NEXT_SRC='' LAST_TIME='' LAST_OK='' LAST_INFO='' WEEKLY_MISS=''
-P_OK=0 P_RESET='' P_FIVEREJ=0 P_INFO='' P_KEYSRC='' P_WEEKLY=0 P_WRESET=''
+P_OK=0 P_RESET='' P_FIVEREJ=0 P_INFO='' P_KEYSRC='' P_WEEKLY=0 P_WRESET='' P_AUTH=0
 
 fmt_time() {
   (( $1 == 0 )) && { printf 'sofort'; return; }
@@ -344,7 +344,7 @@ load_state() {
   [[ $NEXT =~ $re_epoch ]] || return 1
   [[ $LAST_TIME =~ $re_epoch ]] || LAST_TIME=
   [[ $WEEKLY_MISS =~ $re_epoch ]] || WEEKLY_MISS=
-  [[ $NEXT_SRC =~ ^(first|reset|fallback|retry|weekly)$ ]] || NEXT_SRC=
+  [[ $NEXT_SRC =~ ^(first|reset|fallback|retry|weekly|token)$ ]] || NEXT_SRC=
   return 0
 }
 
@@ -386,7 +386,8 @@ src_text() {
     first) echo "erster Puls um 08:00 Uhr" ;;
     reset) echo "Reset des 5-Stunden-Fensters laut Claude Code (+ ${BUFFER} s Puffer)" ;;
     fallback) echo "letzte erfolgreiche Antwort + 5 h + ${BUFFER} s" ;;
-    retry) echo "Pulsbeginn + 5 h + ${BUFFER} s (nach $MAX_ATTEMPTS Fehlversuchen)" ;;
+    retry) echo "Pulsbeginn + 5 h + ${BUFFER} s (letzter Puls fehlgeschlagen)" ;;
+    token) echo "sofort (neuer Abo-Token nach einem fehlgeschlagenen Puls)" ;;
     *) echo "unbekannt" ;;
   esac
 }
@@ -398,6 +399,8 @@ src_text() {
 #   RESET  = 5-Stunden-Fenster (auch bei Ablehnung), WRESET = Wochenfenster, nur wenn das Wochenlimit greift.
 #   FIVEREJ = 1, wenn das 5-Stunden-Fenster laut Claude Code abgelehnt ("rejected") ist, also wirklich voll; bei
 #   "allowed" oder "allowed_warning" 0. Nur dann ist der Reset ein Grund, nach einem Fehlschlag nicht zu wiederholen.
+# AUTH = 1, wenn die API die Anmeldung abgelehnt hat (HTTP 401; beobachtet in Claude Code 2.1.316: Ergebnis mit
+#   api_error_status 401, Text je nach Fehler z. B. "Not logged in · Please run /login" oder "Failed to authenticate").
 PARSER=$(cat <<'PY'
 import json, sys
 
@@ -414,6 +417,7 @@ wresets = ""
 keysrc = ""
 weekly = 0
 five_rejected = 0
+auth_failed = False
 try:
     f = open(sys.argv[1], encoding="utf-8", errors="replace")
 except OSError:
@@ -433,6 +437,8 @@ for line in f:
         res = m
     elif t == "system" and m.get("subtype") == "init":
         keysrc = one(m.get("apiKeySource", ""))
+    elif t == "assistant" and m.get("error") == "authentication_failed":
+        auth_failed = True
     elif t == "rate_limit_event":
         i = m.get("rate_limit_info")
         if isinstance(i, dict):
@@ -454,6 +460,7 @@ for line in f:
                 five_rejected = 1 if w5.get("status") == "rejected" else 0
 
 ok = 0
+auth = 0
 info = "keine Ergebnismeldung in der Ausgabe"
 if res is not None:
     text = res.get("result")
@@ -462,6 +469,8 @@ if res is not None:
         weekly = 1
     if res.get("is_error"):
         info = one(text or res.get("subtype") or "Fehler")
+        if auth_failed or res.get("api_error_status") == 401:
+            auth = 1
     elif not text:
         info = "leere Antwort"
     else:
@@ -473,17 +482,19 @@ print("FIVEREJ=%d" % five_rejected)
 print("KEYSRC=%s" % keysrc)
 print("WEEKLY=%d" % weekly)
 print("WRESET=%s" % wresets)
+print("AUTH=%d" % auth)
 print("INFO=%s" % info)
 PY
 )
 
 # Ergebnis in P_OK, P_RESET, P_FIVEREJ (1 = 5-Stunden-Fenster abgelehnt), P_INFO, P_KEYSRC,
-# P_WEEKLY (1 = Wochenlimit als Fehlerursache erkannt), P_WRESET (Wochen-Reset laut Claude Code). Rückgabe: 0 = Aufruf ausgewertet, 2 = dauerhaftes Problem
-# (Token fehlt, python3 fehlt, oder Claude Code würde über die API abrechnen), Wiederholen sinnlos.
+# P_WEEKLY (1 = Wochenlimit als Fehlerursache erkannt), P_WRESET (Wochen-Reset laut Claude Code), P_AUTH (1 = Anmeldung
+# abgelehnt). Rückgabe: 0 = Aufruf ausgewertet, 2 = dauerhaftes Problem (Token fehlt oder wird abgelehnt, python3 fehlt,
+# oder Claude Code würde über die API abrechnen), Wiederholen sinnlos.
 pulse_once() {
   local tmp rc k v err f auth method provider token_file=${CREDENTIALS_DIRECTORY:-/nonexistent}/oauth-token
   local re_method='"authMethod": *"([^"]*)"' re_provider='"apiProvider": *"([^"]*)"'
-  P_OK=0 P_RESET='' P_FIVEREJ=0 P_INFO='' P_KEYSRC='' P_WEEKLY=0 P_WRESET=''
+  P_OK=0 P_RESET='' P_FIVEREJ=0 P_INFO='' P_KEYSRC='' P_WEEKLY=0 P_WRESET='' P_AUTH=0
 
   LP_TOKEN=''
   [[ -r $token_file ]] && LP_TOKEN=$(<"$token_file")
@@ -566,6 +577,7 @@ pulse_once() {
       KEYSRC) P_KEYSRC=$v ;;
       WEEKLY) P_WEEKLY=$v ;;
       WRESET) P_WRESET=$v ;;
+      AUTH) P_AUTH=$v ;;
       INFO) P_INFO=$v ;;
     esac
   done < <(python3 -I -c "$PARSER" "$tmp/out" 2>/dev/null)
@@ -580,6 +592,16 @@ pulse_once() {
       P_INFO="Claude Code meldet die Anmeldequelle \"$P_KEYSRC\": das würde über die API abgerechnet statt über das Abo. Puls nicht gewertet"
       return 2 ;;
   esac
+
+  # Anmeldung abgelehnt (Token abgelaufen, widerrufen oder falsch): Wiederholen bringt mit diesem Token nichts.
+  # Claude Code rät hier zu "/login"; bei LimitPulse hilft nur ein neuer Token, deshalb nennt die Meldung den Befehl dafür.
+  if [[ $P_AUTH == 1 && $P_OK != 1 ]]; then
+    rm -rf "$tmp"
+    P_INFO=$(scrub "Anmeldung abgelehnt (HTTP 401): Abo-Token abgelaufen, widerrufen oder ungültig, neu setzen mit: sudo limitpulse token (Claude Code: $P_INFO)")
+    LP_TOKEN=''
+    P_OK=0
+    return 2
+  fi
 
   if (( rc == 0 )) && [[ $P_OK == 1 ]]; then
     P_OK=1
@@ -853,7 +875,7 @@ cmd_uninstall() {
 # Intern: "limitpulse token" ruft das als Dienst-Benutzer auf. Macht den nächsten Puls sofort fällig.
 cmd_retry_now() {
   load_state && [[ $LAST_OK == 0 ]] || return 1
-  NEXT=0 NEXT_SRC=retry
+  NEXT=0 NEXT_SRC=token
   save_state
 }
 
@@ -895,7 +917,7 @@ claude_version=
 claude_out=
 if [[ -x $CLAUDE ]]; then
   claude_out=$(cd "$APP_HOME" && runuser -u "$APP_USER" -- env -i HOME="$APP_HOME" PATH="$SAFE_PATH" LANG=C.UTF-8 \
-    "$CLAUDE" --version 2>&1) || claude_out=
+    timeout 60 "$CLAUDE" --version 2>&1 </dev/null) || claude_out=
   if [[ $claude_out =~ ([0-9]+\.[0-9]+\.[0-9]+) ]]; then claude_version=${BASH_REMATCH[1]}; fi
 fi
 claude_ok() {  # $1 = Version; wahr, wenn sie mindestens MIN_CLAUDE_VERSION ist
@@ -921,7 +943,7 @@ else
 
   [[ -x $CLAUDE ]] || die "Claude Code wurde nicht nach $CLAUDE installiert."
   claude_out=$(cd "$APP_HOME" && runuser -u "$APP_USER" -- env -i HOME="$APP_HOME" PATH="$SAFE_PATH" LANG=C.UTF-8 \
-    "$CLAUDE" --version 2>&1) || die "\"claude --version\" schlägt fehl: $claude_out"
+    timeout 60 "$CLAUDE" --version 2>&1 </dev/null) || die "\"claude --version\" schlägt fehl: $claude_out"
   [[ $claude_out =~ ([0-9]+\.[0-9]+\.[0-9]+) ]] || die "Die Claude-Code-Version ist nicht erkennbar: $claude_out"
   claude_version=${BASH_REMATCH[1]}
   claude_ok "$claude_version" \

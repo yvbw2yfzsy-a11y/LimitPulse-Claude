@@ -1,0 +1,5 @@
+{"type": "system", "subtype": "init", "apiKeySource": "none", "model": "claude-haiku-5-5", "claude_code_version": "2.1.316"}
+{"type": "system", "subtype": "api_retry", "attempt": 1, "max_retries": 2, "retry_delay_ms": 545, "error_status": 401, "error": "authentication_failed"}
+{"type": "system", "subtype": "api_retry", "attempt": 2, "max_retries": 2, "retry_delay_ms": 1168, "error_status": 401, "error": "authentication_failed"}
+{"type": "assistant", "message": {"model": "<synthetic>", "role": "assistant", "content": [{"type": "text", "text": "Not logged in · Please run /login"}]}, "error": "authentication_failed"}
+{"type": "result", "subtype": "success", "is_error": true, "result": "Not logged in · Please run /login", "api_error_status": 401, "terminal_reason": "api_error"}

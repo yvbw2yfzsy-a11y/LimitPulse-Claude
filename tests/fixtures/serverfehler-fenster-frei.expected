@@ -4,4 +4,5 @@ FIVEREJ=0
 KEYSRC=none
 WEEKLY=0
 WRESET=
+AUTH=0
 INFO=API Error: 529 Overloaded. This is a server-side issue, usually temporary — try again in a moment.
