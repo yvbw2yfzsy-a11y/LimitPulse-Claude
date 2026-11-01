@@ -325,7 +325,9 @@ log() {  # $1 = info|warn|err, übrige Argumente = Text
 # --- Zeitplan --------------------------------------------------------------------
 
 load_state() {
-  local k v
+  # Zeitstempel ohne führende Nullen: bash läse "08" in Rechnungen als ungültige Oktalzahl, und der Dienst bräche
+  # bei jedem Start ab (systemd startete ihn endlos neu), statt den Zeitplan neu anzulegen.
+  local k v re_epoch='^(0|[1-9][0-9]{0,11})$'
   NEXT='' NEXT_SRC='' LAST_TIME='' LAST_OK='' LAST_INFO='' WEEKLY_MISS=''
   # Nur eine gewöhnliche Datei: kein Symlink (root liest sonst Fremdes) und keine FIFO (Lesen hinge ewig).
   [[ -f $STATE_FILE && ! -L $STATE_FILE && -r $STATE_FILE ]] || return 1
@@ -339,9 +341,9 @@ load_state() {
       WEEKLY_MISS) WEEKLY_MISS=$v ;;
     esac
   done <"$STATE_FILE"
-  [[ $NEXT =~ ^[0-9]{1,12}$ ]] || return 1
-  [[ $LAST_TIME =~ ^[0-9]{1,12}$ ]] || LAST_TIME=
-  [[ $WEEKLY_MISS =~ ^[0-9]{1,12}$ ]] || WEEKLY_MISS=
+  [[ $NEXT =~ $re_epoch ]] || return 1
+  [[ $LAST_TIME =~ $re_epoch ]] || LAST_TIME=
+  [[ $WEEKLY_MISS =~ $re_epoch ]] || WEEKLY_MISS=
   [[ $NEXT_SRC =~ ^(first|reset|fallback|retry|weekly)$ ]] || NEXT_SRC=
   return 0
 }
@@ -829,6 +831,7 @@ cmd_uninstall() {
 
   systemctl disable --now "$UNIT" 2>/dev/null
   rm -f "$UNIT_FILE"
+  rm -rf "$UNIT_FILE.d"   # Ergänzungen aus "systemctl edit" (siehe README); ohne die Unit sind sie verwaist
   systemctl daemon-reload
   systemctl reset-failed "$UNIT" 2>/dev/null
   [[ -L $BIN_LINK ]] && rm -f "$BIN_LINK"
